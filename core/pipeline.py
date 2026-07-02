@@ -136,10 +136,8 @@ class Pipeline:
             
             from agents.script_voiceover import generate_voiceover
             
-            # Generate script and voiceover (use Kokoro as primary)
             voiceover_result = generate_voiceover(
                 clip_manifest,
-                primary_engine='kokoro',
                 trending_topics=[],
                 channel_history=[]
             )
@@ -158,10 +156,27 @@ class Pipeline:
             
             # Step 3: SEO Optimizer
             logger.info("Step 3/7: SEO Optimization")
-            self.log_step(PipelineStep.SEO_OPTIMIZER, 'pending')
-            # Placeholder: actual SEO generation will be implemented in Step 5
-            self.checkpoint.save(PipelineStep.SEO_OPTIMIZER, {})
-            self.log_step(PipelineStep.SEO_OPTIMIZER, 'complete')
+            self.log_step(PipelineStep.SEO_OPTIMIZER, 'in_progress')
+            
+            from agents.seo_optimizer import optimize_seo
+            
+            seo_result = optimize_seo(
+                clip_manifest,
+                voiceover_result,
+                trending_topics=[]
+            )
+            self.step_outputs['seo_optimizer'] = seo_result
+            
+            # Save SEO metadata
+            seo_path = self.output_dir / f"{self.video_path.stem}_seo_metadata.json"
+            with open(seo_path, 'w') as f:
+                json.dump(seo_result, f, indent=2)
+            
+            self.checkpoint.save(PipelineStep.SEO_OPTIMIZER, {'seo_path': str(seo_path)})
+            self.log_step(PipelineStep.SEO_OPTIMIZER, 'complete', {
+                'best_title': seo_result.get('best_title'),
+                'hashtags_count': len(seo_result.get('metadata', {}).get('hashtags', []))
+            })
             
             # Step 4: Video Production
             logger.info("Step 4/7: Video Production")
