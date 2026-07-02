@@ -132,10 +132,29 @@ class Pipeline:
             
             # Step 2: Script + Voiceover
             logger.info("Step 2/7: Script Generation + Voiceover")
-            self.log_step(PipelineStep.SCRIPT_VOICEOVER, 'pending')
-            # Placeholder: actual script generation will be implemented in Step 4
-            self.checkpoint.save(PipelineStep.SCRIPT_VOICEOVER, {})
-            self.log_step(PipelineStep.SCRIPT_VOICEOVER, 'complete')
+            self.log_step(PipelineStep.SCRIPT_VOICEOVER, 'in_progress')
+            
+            from agents.script_voiceover import generate_voiceover
+            
+            # Generate script and voiceover (use Kokoro as primary)
+            voiceover_result = generate_voiceover(
+                clip_manifest,
+                primary_engine='kokoro',
+                trending_topics=[],
+                channel_history=[]
+            )
+            self.step_outputs['script_voiceover'] = voiceover_result
+            
+            # Save voiceover metadata
+            voiceover_path = self.output_dir / f"{self.video_path.stem}_voiceover_metadata.json"
+            with open(voiceover_path, 'w') as f:
+                json.dump(voiceover_result, f, indent=2)
+            
+            self.checkpoint.save(PipelineStep.SCRIPT_VOICEOVER, {'voiceover_path': str(voiceover_path)})
+            self.log_step(PipelineStep.SCRIPT_VOICEOVER, 'complete', {
+                'engine': voiceover_result.get('voiceover', {}).get('engine'),
+                'audio_path': voiceover_result.get('voiceover', {}).get('audio_path')
+            })
             
             # Step 3: SEO Optimizer
             logger.info("Step 3/7: SEO Optimization")
