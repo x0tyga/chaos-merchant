@@ -114,7 +114,11 @@ class CaptionSynchronizer:
 
     def __init__(self, script: str):
         self.script = script
-        self.font_path = None
+        # NOTE: Current implementation uses system default font for compatibility
+        # BEFORE CHANNEL GOES LIVE: Replace with Bebas Neue or custom gaming-style font
+        # Set CAPTION_FONT_PATH in .env to override (e.g., /path/to/BebasNeue-Regular.ttf)
+        # Gaming fonts improve brand identity and visual appeal on YouTube Shorts
+        self.font_path = os.getenv('CAPTION_FONT_PATH', None)
 
     def generate_caption_timeline(self, voiceover_duration: float) -> List[Tuple[float, float, str]]:
         """
@@ -156,13 +160,18 @@ class CaptionSynchronizer:
             try:
                 duration = end_time - start_time
 
-                text_clip = TextClip(
-                    text,
-                    fontsize=self.CAPTION_FONT_SIZE,
-                    color=self.CAPTION_COLOR,
-                    method='caption',
-                    size=(video_clip.w - 2 * self.SAFE_MARGIN, None)
-                )
+                text_clip_kwargs = {
+                    'text': text,
+                    'fontsize': self.CAPTION_FONT_SIZE,
+                    'color': self.CAPTION_COLOR,
+                    'method': 'caption',
+                    'size': (video_clip.w - 2 * self.SAFE_MARGIN, None)
+                }
+
+                if self.font_path and Path(self.font_path).exists():
+                    text_clip_kwargs['font'] = self.font_path
+
+                text_clip = TextClip(**text_clip_kwargs)
 
                 text_clip = text_clip.set_duration(duration).set_start(start_time)
                 text_clip = text_clip.set_position(('center', video_clip.h - self.SAFE_MARGIN - 100))
