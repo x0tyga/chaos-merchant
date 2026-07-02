@@ -210,10 +210,32 @@ class Pipeline:
             
             # Step 5: Thumbnail Generation
             logger.info("Step 5/7: Thumbnail Generation")
-            self.log_step(PipelineStep.THUMBNAIL, 'pending')
-            # Placeholder: actual thumbnail generation will be implemented in Step 7
-            self.checkpoint.save(PipelineStep.THUMBNAIL, {})
-            self.log_step(PipelineStep.THUMBNAIL, 'complete')
+            self.log_step(PipelineStep.THUMBNAIL, 'in_progress')
+
+            from agents.thumbnail import generate_thumbnails
+
+            thumbnail_result = generate_thumbnails(
+                clip_manifest=self.step_outputs['clip_intelligence'],
+                seo_manifest=self.step_outputs['seo_optimizer'],
+                voiceover_result=self.step_outputs['script_voiceover'],
+                output_dir=str(self.output_dir)
+            )
+            self.step_outputs['thumbnail'] = thumbnail_result
+
+            # Save thumbnail manifest
+            thumbnail_manifest_path = self.output_dir / f"{self.video_path.stem}_thumbnail_manifest.json"
+            with open(thumbnail_manifest_path, 'w') as f:
+                json.dump(thumbnail_result, f, indent=2)
+
+            self.checkpoint.save(PipelineStep.THUMBNAIL, {
+                'manifest_path': str(thumbnail_manifest_path),
+                'generated_count': thumbnail_result.get('generated_count', 0),
+                'brief_only_count': thumbnail_result.get('brief_only_count', 0)
+            })
+            self.log_step(PipelineStep.THUMBNAIL, 'complete', {
+                'generated': thumbnail_result.get('generated_count', 0),
+                'brief_only': thumbnail_result.get('brief_only_count', 0)
+            })
             
             # Step 6: Quality Control
             logger.info("Step 6/7: Quality Control")
