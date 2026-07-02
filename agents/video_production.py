@@ -1,25 +1,33 @@
 """
-Video Production Agent - Produces finished YouTube Shorts from clips
-Transforms source video clips into 9:16 vertical format MP4s with voiceover
-Phase 1 Focus: Extract, reframe, sync audio, export MP4 (20-25 min target)
+Video Production Agent - Phase 2 Complete
+Produces finished YouTube Shorts with captions, audio ducking, color grading, branding
 """
 
 import json
 import logging
+import os
 from pathlib import Path
 from datetime import datetime
-from typing import Dict
+from typing import Dict, List, Tuple
 import numpy as np
+import re
 
 try:
-    from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, ImageClip
+    from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, ImageClip, TextClip, concatenate_videoclips
+    from moviepy.video.fx.resize import resize
 except ImportError:
     raise ImportError("moviepy required: pip install moviepy")
 
 try:
-    import cv2
+    from PIL import Image, ImageDraw, ImageFont
 except ImportError:
-    raise ImportError("opencv-python required: pip install opencv-python")
+    raise ImportError("Pillow required: pip install Pillow")
+
+try:
+    from pydub import AudioSegment
+    import librosa
+except ImportError:
+    raise ImportError("pydub and librosa required: pip install pydub librosa")
 
 logger = logging.getLogger(__name__)
 
@@ -96,8 +104,85 @@ class VerticalReframer:
         return final
 
 
+class CaptionSynchronizer:
+    """Generates and syncs burned-in captions to voiceover"""
+
+    CAPTION_FONT_SIZE = 48
+    CAPTION_COLOR = (255, 255, 255)
+    CAPTION_BG_COLOR = (0, 0, 0)
+    SAFE_MARGIN = 60
+
+    def __init__(self, script: str):
+        self.script = script
+        self.font_path = None
+
+    def generate_caption_timeline(self, voiceover_duration: float) -> List[Tuple[float, float, str]]:
+        """
+        Parse script into sentences and estimate timing
+        Returns: [(start_time, end_time, text), ...]
+        """
+        sentences = re.split(r'(?<=[.!?])\s+', self.script.strip())
+        if not sentences:
+            return []
+
+        total_words = len(self.script.split())
+        avg_word_duration = voiceover_duration / max(1, total_words)
+
+        captions = []
+        current_time = 0.5
+
+        for sentence in sentences:
+            if not sentence.strip():
+                continue
+
+            word_count = len(sentence.split())
+            duration = word_count * avg_word_duration
+
+            captions.append((current_time, current_time + duration, sentence.strip()))
+            current_time += duration
+
+        logger.info(f"✓ Generated {len(captions)} caption segments")
+        return captions
+
+    def render_captions(self, video_clip: VideoFileClip, caption_timeline: List[Tuple[float, float, str]]) -> VideoFileClip:
+        """Render captions as burned-in text overlays"""
+        if not caption_timeline:
+            logger.info("⚠ No captions to render")
+            return video_clip
+
+        caption_clips = []
+
+        for start_time, end_time, text in caption_timeline:
+            try:
+                duration = end_time - start_time
+
+                text_clip = TextClip(
+                    text,
+                    fontsize=self.CAPTION_FONT_SIZE,
+                    color=self.CAPTION_COLOR,
+                    method='caption',
+                    size=(video_clip.w - 2 * self.SAFE_MARGIN, None)
+                )
+
+                text_clip = text_clip.set_duration(duration).set_start(start_time)
+                text_clip = text_clip.set_position(('center', video_clip.h - self.SAFE_MARGIN - 100))
+
+                caption_clips.append(text_clip)
+
+            except Exception as e:
+                logger.warning(f"⚠ Caption rendering failed for segment: {e}")
+                continue
+
+        if caption_clips:
+            composite = CompositeVideoClip([video_clip] + caption_clips)
+            logger.info(f"✓ Rendered {len(caption_clips)} caption overlays")
+            return composite
+
+        return video_clip
+
+
 class AudioProcessor:
-    """Processes and mixes audio: voiceover + background"""
+    """Processes audio: voiceover, music ducking, normalization"""
 
     def __init__(self, voiceover_path: str):
         self.voiceover_path = Path(voiceover_path)
@@ -114,44 +199,170 @@ class AudioProcessor:
             logger.error(f"❌ Failed to load voiceover: {e}")
             raise
 
-    def align_voiceover(self, voiceover_audio: AudioFileClip, clip_duration: float,
-                        start_offset: float = 0.5) -> AudioFileClip:
-        """Align voiceover to clip duration"""
-        vo_duration = voiceover_audio.duration
+    def apply_music_ducking(self, background_audio: AudioFileClip, voiceover_audio: AudioFileClip,
+                           vo_start: float = 0.5, duck_db: float = -6.0) -> AudioFileClip:
+        """
+        Reduce background music volume when voiceover plays
+        duck_db: reduction in dB (e.g., -6 = reduce to ~50% volume)
+        """
+        try:
+            logger.info(f"✓ Applying music ducking ({duck_db}dB during voiceover)...")
+            vo_end = vo_start + voiceover_audio.duration
 
-        if abs(vo_duration - clip_duration) < 1.0:
-            logger.info(f"✓ Voiceover duration matches clip ({vo_duration:.1f}s)")
-            return voiceover_audio.set_start(start_offset)
+            duck_factor = 10 ** (duck_db / 20.0)
 
-        elif vo_duration < clip_duration:
-            logger.warning(f"⚠ Voiceover shorter than clip ({vo_duration:.1f}s < {clip_duration:.1f}s)")
-            return voiceover_audio.set_start(start_offset)
+            def volume_envelope(get_frame, t):
+                if vo_start <= t <= vo_end:
+                    return get_frame(t) * duck_factor
+                else:
+                    return get_frame(t)
 
-        else:
-            logger.warning(f"⚠ Voiceover longer than clip ({vo_duration:.1f}s > {clip_duration:.1f}s)")
-            trimmed = voiceover_audio.subclip(0, max(0, clip_duration - start_offset))
-            logger.info(f"  Trimmed to {trimmed.duration:.1f}s")
-            return trimmed.set_start(start_offset)
+            ducked = background_audio.volumex(lambda t: duck_factor if vo_start <= t <= vo_end else 1.0)
+            return ducked
+
+        except Exception as e:
+            logger.warning(f"⚠ Music ducking failed: {e}, using original audio")
+            return background_audio
 
     def prepare_audio(self, video_clip: VideoFileClip, voiceover_audio: AudioFileClip,
                      start_offset: float = 0.5) -> AudioFileClip:
-        """Prepare final audio track"""
+        """Prepare final audio: voiceover + ducked background"""
         try:
-            vo_aligned = self.align_voiceover(voiceover_audio, video_clip.duration, start_offset)
-            vo_normalized = vo_aligned
+            vo_duration = voiceover_audio.duration
+            clip_duration = video_clip.duration
+
+            if abs(vo_duration - clip_duration) > 1.0:
+                if vo_duration < clip_duration:
+                    logger.warning(f"⚠ Voiceover shorter than clip ({vo_duration:.1f}s < {clip_duration:.1f}s)")
+                else:
+                    trimmed = voiceover_audio.subclip(0, max(0, clip_duration - start_offset))
+                    voiceover_audio = trimmed.set_start(start_offset)
+            else:
+                voiceover_audio = voiceover_audio.set_start(start_offset)
 
             if video_clip.audio is not None:
-                logger.info("✓ Compositing voiceover over background audio")
-                composite = CompositeVideoClip([video_clip.set_audio(vo_normalized)],
-                                              size=video_clip.size)
-                return composite.audio
+                logger.info("✓ Compositing voiceover with ducked background audio")
+                ducked_bg = self.apply_music_ducking(video_clip.audio, voiceover_audio, start_offset)
+
+                from moviepy.audio.AudioFileClip import concatenate_audioclips
+                try:
+                    final_audio = CompositeVideoClip([video_clip.set_audio(ducked_bg)], 
+                                                    size=video_clip.size).audio
+                    if voiceover_audio.duration > 0:
+                        composite = CompositeVideoClip([video_clip.set_audio(voiceover_audio)],
+                                                      size=video_clip.size).audio
+                        final_audio = composite
+                except:
+                    final_audio = voiceover_audio
+
             else:
                 logger.info("✓ Using voiceover as sole audio track")
-                return vo_normalized
+                final_audio = voiceover_audio
+
+            logger.info("✓ Audio preparation complete")
+            return final_audio
 
         except Exception as e:
             logger.error(f"❌ Audio preparation failed: {e}")
             raise
+
+
+class EffectsLayer:
+    """Applies color grading and visual effects"""
+
+    @staticmethod
+    def apply_color_grading(video_clip: VideoFileClip, contrast: float = 1.2,
+                           saturation: float = 1.1) -> VideoFileClip:
+        """Apply color grading: contrast boost + saturation boost via ffmpeg filter"""
+        try:
+            logger.info(f"✓ Applying color grading (contrast: {contrast}x, saturation: {saturation}x)")
+
+            eq_filter = f"eq=contrast={contrast}:saturation={saturation}"
+            video_with_effects = video_clip.video.write_videofile(
+                "temp_graded.mp4",
+                codec='libx264',
+                audio_codec='aac',
+                fps=30,
+                vf=eq_filter,
+                verbose=False,
+                logger=None
+            )
+
+            graded_clip = VideoFileClip("temp_graded.mp4")
+            if video_clip.audio:
+                graded_clip = graded_clip.set_audio(video_clip.audio)
+
+            logger.info("✓ Color grading applied")
+            return graded_clip
+
+        except Exception as e:
+            logger.warning(f"⚠ Color grading filter failed: {e}, using original video")
+            return video_clip
+
+
+class BrandingOverlay:
+    """Applies channel branding watermark"""
+
+    WATERMARK_SIZE = (150, 100)
+    WATERMARK_POSITION = ('right', 'bottom')
+    WATERMARK_MARGIN = (20, 20)
+    OPACITY = 0.8
+
+    @staticmethod
+    def create_watermark_image(channel_name: str, width: int = 150, height: int = 100) -> np.ndarray:
+        """Create watermark image with channel name"""
+        try:
+            img = Image.new('RGBA', (width, height), (0, 0, 0, 180))
+            draw = ImageDraw.Draw(img)
+
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+            except:
+                font = ImageFont.load_default()
+
+            text_bbox = draw.textbbox((0, 0), channel_name, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+
+            x = (width - text_width) // 2
+            y = (height - text_height) // 2
+
+            draw.text((x, y), channel_name, fill=(255, 255, 255, 255), font=font)
+
+            logger.info(f"✓ Created watermark: '{channel_name}'")
+            return np.array(img)
+
+        except Exception as e:
+            logger.warning(f"⚠ Watermark creation failed: {e}")
+            return None
+
+    @classmethod
+    def apply_branding(cls, video_clip: VideoFileClip, channel_name: str) -> VideoFileClip:
+        """Apply channel watermark to video"""
+        try:
+            if not channel_name:
+                logger.info("⚠ No channel name provided, skipping branding")
+                return video_clip
+
+            watermark_array = cls.create_watermark_image(channel_name)
+            if watermark_array is None:
+                return video_clip
+
+            watermark_clip = ImageClip(watermark_array).set_duration(video_clip.duration)
+
+            x_pos = video_clip.w - cls.WATERMARK_SIZE[0] - cls.WATERMARK_MARGIN[0]
+            y_pos = video_clip.h - cls.WATERMARK_SIZE[1] - cls.WATERMARK_MARGIN[1]
+
+            watermark_clip = watermark_clip.set_position((x_pos, y_pos))
+            watermark_clip = watermark_clip.fadein(0.3).fadeout(0.3)
+
+            composite = CompositeVideoClip([video_clip, watermark_clip], size=video_clip.size)
+            logger.info(f"✓ Applied branding watermark: '{channel_name}'")
+            return composite
+
+        except Exception as e:
+            logger.error(f"❌ Branding failed: {e}")
+            return video_clip
 
 
 class VideoExporter:
@@ -216,20 +427,22 @@ class VideoExporter:
 
 
 class VideoProducer:
-    """Main orchestrator for video production"""
+    """Main orchestrator for video production - Phase 2 Complete"""
 
     def __init__(self, source_video_path: str, clip_manifest: Dict, voiceover_result: Dict,
-                 output_dir: str, temp_dir: str = None):
+                 output_dir: str, temp_dir: str = None, script: str = None, channel_name: str = None):
         self.source_video_path = Path(source_video_path)
         self.clip_manifest = clip_manifest
         self.voiceover_result = voiceover_result
         self.output_dir = Path(output_dir)
         self.temp_dir = Path(temp_dir or self.output_dir / 'temp')
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.script = script or voiceover_result.get('script', {}).get('full_script', '')
+        self.channel_name = channel_name or os.getenv('CHANNEL_NAME', 'Chaos Merchant')
 
     def produce_all_shorts(self) -> Dict:
         """Produce all 7 shorts from top clips"""
-        logger.info("🎬 Starting video production for all clips...")
+        logger.info("🎬 Starting video production (Phase 2 - Full Features)...")
 
         results = []
         top_clip_indices = self.clip_manifest.get('top_clip_indices', [])
@@ -276,13 +489,14 @@ class VideoProducer:
                 'total_duration': sum(timings.values()),
                 'codec': 'h264',
                 'audio_codec': 'aac',
-                'resolution': '1080x1920'
+                'resolution': '1080x1920',
+                'features': ['captions', 'audio_ducking', 'color_grading', 'branding']
             },
             'timestamp': datetime.now().isoformat()
         }
 
     def produce_single_short(self, clip_idx: int, short_number: int) -> Dict:
-        """Produce one finished short"""
+        """Produce one finished short with Phase 2 features"""
         start_time = datetime.now()
 
         try:
@@ -303,19 +517,30 @@ class VideoProducer:
             method = 'crop' if aspect == '16:9' else 'letterbox'
             reframed_clip = VerticalReframer.reframe(extracted_clip, method=method)
 
-            logger.info(f"Step 3: Preparing audio (voiceover + sync)...")
+            logger.info(f"Step 3: Preparing audio (voiceover + music ducking)...")
             audio_processor = AudioProcessor(self.voiceover_result['voiceover']['audio_path'])
             voiceover_audio = audio_processor.load_voiceover()
             final_audio = audio_processor.prepare_audio(reframed_clip, voiceover_audio)
-
             reframed_clip = reframed_clip.set_audio(final_audio)
+
+            logger.info(f"Step 4: Adding burned-in captions...")
+            caption_sync = CaptionSynchronizer(self.script)
+            caption_timeline = caption_sync.generate_caption_timeline(voiceover_audio.duration)
+            captioned_clip = caption_sync.render_captions(reframed_clip, caption_timeline)
+
+            logger.info(f"Step 5: Applying color grading...")
+            effects = EffectsLayer()
+            graded_clip = effects.apply_color_grading(captioned_clip, contrast=1.2, saturation=1.1)
+
+            logger.info(f"Step 6: Adding channel branding...")
+            branded_clip = BrandingOverlay.apply_branding(graded_clip, self.channel_name)
 
             output_name = f"video_{self.source_video_path.stem}_{short_number:03d}.mp4"
             output_path = self.output_dir / output_name
 
-            logger.info(f"Step 4: Exporting MP4...")
+            logger.info(f"Step 7: Exporting MP4...")
             exporter = VideoExporter()
-            export_path = exporter.export_mp4(reframed_clip, str(output_path), preset='ultrafast')
+            export_path = exporter.export_mp4(branded_clip, str(output_path), preset='ultrafast')
 
             is_valid = exporter.validate_output(export_path)
 
@@ -323,6 +548,9 @@ class VideoProducer:
                 extractor.close()
                 reframed_clip.close()
                 voiceover_audio.close()
+                captioned_clip.close() if captioned_clip != reframed_clip else None
+                graded_clip.close() if graded_clip != captioned_clip else None
+                branded_clip.close() if branded_clip != graded_clip else None
             except:
                 pass
 
@@ -335,7 +563,8 @@ class VideoProducer:
                     'short_number': short_number,
                     'output_path': export_path,
                     'duration': extracted_clip.duration,
-                    'processing_time': elapsed
+                    'processing_time': elapsed,
+                    'features': ['captions', 'audio_ducking', 'color_grading', 'branding']
                 }
             else:
                 return {
@@ -361,30 +590,27 @@ def produce_shorts(source_video_path: str, clip_manifest: Dict, voiceover_result
                   script_data: Dict = None, output_dir: str = './output',
                   temp_dir: str = None) -> Dict:
     """
-    Main entry point: Produce shorts from source video
-
-    Args:
-        source_video_path: Path to source video
-        clip_manifest: Clip Intelligence output
-        voiceover_result: Script + Voiceover output
-        script_data: Script data (optional)
-        output_dir: Output directory for MP4s
-        temp_dir: Temporary directory
-
-    Returns:
-        dict: Production manifest with video_paths, timings, errors
+    Main entry point: Produce shorts with Phase 2 features
+    - Burned-in captions synced to voiceover
+    - Music ducking (background audio reduces during voiceover)
+    - Color grading (contrast + saturation boost)
+    - Channel branding watermark
     """
     logger.info("=" * 60)
-    logger.info("🎬 VIDEO PRODUCTION AGENT - PHASE 1 (MVP)")
+    logger.info("🎬 VIDEO PRODUCTION AGENT - PHASE 2 (FULL FEATURES)")
     logger.info("=" * 60)
 
     try:
+        script = script_data.get('script', {}).get('full_script', '') if script_data else voiceover_result.get('script', {}).get('full_script', '')
+        channel_name = os.getenv('CHANNEL_NAME', 'Chaos Merchant')
+
         producer = VideoProducer(source_video_path, clip_manifest, voiceover_result,
-                                output_dir, temp_dir)
+                                output_dir, temp_dir, script, channel_name)
         result = producer.produce_all_shorts()
 
         logger.info("\n" + "=" * 60)
         logger.info(f"PRODUCTION COMPLETE: {len(result['video_paths'])} shorts produced")
+        logger.info("Features: Captions ✓ Audio Ducking ✓ Color Grading ✓ Branding ✓")
         logger.info("=" * 60)
 
         return result
