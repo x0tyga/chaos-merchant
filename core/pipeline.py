@@ -180,10 +180,33 @@ class Pipeline:
             
             # Step 4: Video Production
             logger.info("Step 4/7: Video Production")
-            self.log_step(PipelineStep.VIDEO_PRODUCTION, 'pending')
-            # Placeholder: actual video production will be implemented in Step 6
-            self.checkpoint.save(PipelineStep.VIDEO_PRODUCTION, {})
-            self.log_step(PipelineStep.VIDEO_PRODUCTION, 'complete')
+            self.log_step(PipelineStep.VIDEO_PRODUCTION, 'in_progress')
+
+            from agents.video_production import produce_shorts
+
+            production_result = produce_shorts(
+                source_video_path=str(self.video_path),
+                clip_manifest=self.step_outputs['clip_intelligence'],
+                voiceover_result=self.step_outputs['script_voiceover'],
+                script_data=self.step_outputs['script_voiceover'],
+                output_dir=str(self.output_dir),
+                temp_dir=str(self.output_dir / 'temp')
+            )
+            self.step_outputs['video_production'] = production_result
+
+            # Save video manifest
+            video_manifest_path = self.output_dir / f"{self.video_path.stem}_video_manifest.json"
+            with open(video_manifest_path, 'w') as f:
+                json.dump(production_result, f, indent=2)
+
+            self.checkpoint.save(PipelineStep.VIDEO_PRODUCTION, {
+                'manifest_path': str(video_manifest_path),
+                'video_count': len(production_result.get('video_paths', []))
+            })
+            self.log_step(PipelineStep.VIDEO_PRODUCTION, 'complete', {
+                'videos_produced': len(production_result.get('video_paths', [])),
+                'total_time': production_result.get('processing_times', {}).get('export_total', 0)
+            })
             
             # Step 5: Thumbnail Generation
             logger.info("Step 5/7: Thumbnail Generation")
