@@ -402,6 +402,25 @@ When QC fails with errors:
 }
 ```
 
+### Quality Control - Known Limitations
+
+**Caption Detection False Positives**
+- **Issue:** Frame detection analyzes bottom 15% of video for bright text on dark background
+- **Risk:** Source video UI elements (game menus, HUD text, bright screen regions) in lower portion can trigger false positives
+- **Mitigation:** Monitor during real footage testing; adjust frame detection thresholds if needed
+- **Expected:** Minor false positives on first 1-2 batches of real gaming footage; refine detection after
+- **Impact:** Low - worst case, falsely flags a video with bright UI as having captions; manual review catches it
+- **Acceptable:** Yes, for launch. Will improve with channel-specific tuning
+
+**Content Similarity - Initial Population Phase**
+- **Issue:** Content similarity check requires 14-day channel history to work
+- **First 14 Days:** Check runs but finds no prior shorts; effectively inactive until history builds
+- **Expected Behavior:** All new content shows "similarity check skipped" for first 2 weeks
+- **After 14 Days:** Full deduplication active; scans all recent shorts
+- **Impact:** First batch has no protection against accidental topic repeats (single-batch risk)
+- **Acceptable:** Yes, for launch. Real protection kicks in after first 2 weeks of daily uploads
+- **Setup:** Channel memory auto-populates as shorts are published via YouTube API
+
 ### YouTube API quota exceeded
 - Build tracks quota in `data/quota_tracker.json`
 - Graceful degradation: analytics throttles first

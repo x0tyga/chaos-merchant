@@ -279,10 +279,37 @@ class Pipeline:
             
             # Step 7: Output Packaging
             logger.info("Step 7/7: Output Packaging")
-            self.log_step(PipelineStep.OUTPUT_PACKAGING, 'pending')
-            # Placeholder: actual output packaging will be implemented in Step 9
-            self.checkpoint.save(PipelineStep.OUTPUT_PACKAGING, {})
-            self.log_step(PipelineStep.OUTPUT_PACKAGING, 'complete')
+            self.log_step(PipelineStep.OUTPUT_PACKAGING, 'in_progress')
+
+            from agents.output_packaging import package_outputs
+
+            packaging_result = package_outputs(
+                clip_manifest=self.step_outputs['clip_intelligence'],
+                seo_manifest=self.step_outputs['seo_optimizer'],
+                video_manifest=self.step_outputs['video_production'],
+                thumbnail_manifest=self.step_outputs['thumbnail'],
+                qc_result=self.step_outputs['quality_control'],
+                output_dir=str(self.output_dir),
+                video_base_name=self.video_path.stem
+            )
+            self.step_outputs['output_packaging'] = packaging_result
+
+            # Save packaging manifest
+            packaging_manifest_path = self.output_dir / f"{self.video_path.stem}_packaging_manifest.json"
+            with open(packaging_manifest_path, 'w') as f:
+                json.dump(packaging_result, f, indent=2)
+
+            self.checkpoint.save(PipelineStep.OUTPUT_PACKAGING, {
+                'manifest_path': str(packaging_manifest_path),
+                'batch_folder': packaging_result.get('batch_folder'),
+                'batch_id': packaging_result.get('batch_id')
+            })
+
+            self.log_step(PipelineStep.OUTPUT_PACKAGING, 'complete', {
+                'batch_id': packaging_result.get('batch_id'),
+                'videos_organized': packaging_result.get('packaging_result', {}).get('videos_organized'),
+                'ready_for_upload': packaging_result.get('ready_for_upload')
+            })
             
             # Pipeline complete
             logger.info("✅ Pipeline complete!")
