@@ -65,15 +65,18 @@ class PipelineCheckpoint:
 class Pipeline:
     """Main pipeline orchestrator"""
 
-    def __init__(self, video_path, data_dir='./data'):
+    def __init__(self, video_path, data_dir='./data', output_dir='./output'):
         self.video_path = Path(video_path)
         self.data_dir = Path(data_dir)
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint = PipelineCheckpoint(video_path)
         self.processing_log = {
             'video_path': str(video_path),
             'started_at': datetime.now().isoformat(),
             'steps': {}
         }
+        self.step_outputs = {}
 
     def log_step(self, step, status, details=None):
         """Log step execution"""
@@ -113,10 +116,19 @@ class Pipeline:
         try:
             # Step 1: Clip Intelligence
             logger.info("Step 1/7: Clip Intelligence Analysis")
-            self.log_step(PipelineStep.CLIP_INTELLIGENCE, 'pending')
-            # Placeholder: actual clip analysis will be implemented in Step 3
-            self.checkpoint.save(PipelineStep.CLIP_INTELLIGENCE, {})
-            self.log_step(PipelineStep.CLIP_INTELLIGENCE, 'complete')
+            self.log_step(PipelineStep.CLIP_INTELLIGENCE, 'in_progress')
+            
+            from agents.clip_intelligence import analyze_video
+            clip_manifest = analyze_video(str(self.video_path), num_clips=7)
+            self.step_outputs['clip_intelligence'] = clip_manifest
+            
+            # Save clip manifest
+            manifest_path = self.output_dir / f"{self.video_path.stem}_clip_manifest.json"
+            with open(manifest_path, 'w') as f:
+                json.dump(clip_manifest, f, indent=2)
+            
+            self.checkpoint.save(PipelineStep.CLIP_INTELLIGENCE, {'manifest_path': str(manifest_path)})
+            self.log_step(PipelineStep.CLIP_INTELLIGENCE, 'complete', {'clips_found': len(clip_manifest['clips']), 'top_clips': len(clip_manifest['top_clip_indices'])})
             
             # Step 2: Script + Voiceover
             logger.info("Step 2/7: Script Generation + Voiceover")
@@ -169,7 +181,8 @@ class Pipeline:
             return {
                 'status': 'success',
                 'video_path': str(self.video_path),
-                'processing_log': self.processing_log
+                'processing_log': self.processing_log,
+                'step_outputs': self.step_outputs
             }
             
         except Exception as e:
