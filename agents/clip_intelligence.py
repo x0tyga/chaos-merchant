@@ -5,6 +5,7 @@ Analyzes raw video to identify best clips for YouTube Shorts
 
 import json
 import logging
+import os
 from pathlib import Path
 from datetime import datetime
 import numpy as np
@@ -112,19 +113,31 @@ class VideoAnalyzer:
             logger.warning(f"⚠️  Could not extract audio features: {e}")
             return None
 
-    def segment_video(self, scene_changes, min_duration=5, max_duration=60):
+    def segment_video(self, scene_changes, min_duration=None, max_duration=None):
         """
         Create video segments based on scene changes
         
+        Shorter clips (15-45s) improve algorithm completion rate at launch by:
+        - Reducing processing time per clip
+        - Minimizing speech-to-silence segments
+        - Enabling faster iteration and testing
+        - Balancing content variety across shorts
+        
         Args:
             scene_changes: List of frame indices with scene changes
-            min_duration: Minimum segment duration in seconds
-            max_duration: Maximum segment duration in seconds
+            min_duration: Minimum segment duration in seconds (default: env var or 15)
+            max_duration: Maximum segment duration in seconds (default: env var or 45)
         
         Returns:
             list: Segment dictionaries
         """
-        logger.info("✂️  Creating video segments...")
+        # Load duration defaults from environment (configurable)
+        if min_duration is None:
+            min_duration = int(os.getenv('MIN_CLIP_DURATION', 15))
+        if max_duration is None:
+            max_duration = int(os.getenv('MAX_CLIP_DURATION', 45))
+        
+        logger.info(f"✂️  Creating video segments ({min_duration}s-{max_duration}s)...")
         segments = []
         
         # Add segment boundaries
@@ -267,7 +280,7 @@ def analyze_video(video_path, num_clips=7, scene_threshold=25.0):
         # Detect scene changes
         scene_changes = analyzer.detect_scene_changes(threshold=scene_threshold)
         
-        # Create segments
+        # Create segments (uses MIN_CLIP_DURATION and MAX_CLIP_DURATION from env)
         segments = analyzer.segment_video(scene_changes)
         
         # Extract audio features
