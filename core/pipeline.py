@@ -239,10 +239,43 @@ class Pipeline:
             
             # Step 6: Quality Control
             logger.info("Step 6/7: Quality Control")
-            self.log_step(PipelineStep.QUALITY_CONTROL, 'pending')
-            # Placeholder: actual QC will be implemented in Step 8
-            self.checkpoint.save(PipelineStep.QUALITY_CONTROL, {})
-            self.log_step(PipelineStep.QUALITY_CONTROL, 'complete')
+            self.log_step(PipelineStep.QUALITY_CONTROL, 'in_progress')
+
+            from agents.quality_control import perform_quality_control
+
+            qc_result = perform_quality_control(
+                clip_manifest=self.step_outputs['clip_intelligence'],
+                seo_manifest=self.step_outputs['seo_optimizer'],
+                video_manifest=self.step_outputs['video_production'],
+                thumbnail_manifest=self.step_outputs['thumbnail'],
+                output_dir=str(self.output_dir)
+            )
+            self.step_outputs['quality_control'] = qc_result
+
+            # Save QC manifest
+            qc_manifest_path = self.output_dir / f"{self.video_path.stem}_qc_manifest.json"
+            with open(qc_manifest_path, 'w') as f:
+                json.dump(qc_result, f, indent=2)
+
+            self.checkpoint.save(PipelineStep.QUALITY_CONTROL, {
+                'manifest_path': str(qc_manifest_path),
+                'status': qc_result.get('status'),
+                'routing': qc_result.get('routing')
+            })
+
+            if qc_result.get('status') == 'error':
+                logger.error(f"❌ QC validation failed: {qc_result.get('errors', [])}")
+                self.log_step(PipelineStep.QUALITY_CONTROL, 'failed', {
+                    'errors': qc_result.get('errors', []),
+                    'routing': 'manual_review'
+                })
+                raise Exception(f"Quality Control failed: {qc_result.get('errors', [])}")
+
+            self.log_step(PipelineStep.QUALITY_CONTROL, 'complete', {
+                'status': qc_result.get('status'),
+                'warnings': len(qc_result.get('warnings', [])),
+                'routing': qc_result.get('routing')
+            })
             
             # Step 7: Output Packaging
             logger.info("Step 7/7: Output Packaging")

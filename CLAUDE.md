@@ -282,10 +282,125 @@ Install: `brew install ffmpeg` (macOS) or `apt-get install ffmpeg` (Linux)
 - 8.5 minutes for full audiobook is normal
 - For 7 shorts (~5-10 min total audio): expect 2-3 minutes
 
-### Canva MCP unavailable in session
-- Agent automatically falls back to `brief_only` mode
-- User can manually create thumbnail from brief + prompt
-- Next batch retries Canva MCP
+### Canva MCP Thumbnail Generation - Session Dependency
+
+**CRITICAL SETUP NOTE:** Canva MCP thumbnails ONLY work when Claude Code is actively running in a session.
+
+**Two Operating Modes:**
+
+**Mode 1: Claude Code Active Session (Cloud/Interactive)**
+- ✅ Canva MCP available: thumbnail images generated directly
+- Pipeline can create thumbnails end-to-end
+- Output: `thumbnails[].image_url` (ready for upload)
+- Setup: Run via Claude Code web/desktop app
+
+**Mode 2: Autonomous Home Machine (No Session)**
+- ❌ Canva MCP NOT available: falls back to `brief_only` mode
+- Pipeline generates detailed visual briefs instead of images
+- Output: `thumbnails[].brief` + `thumbnails[].canva_prompt` + `instructions`
+- Workflow: User manually creates thumbnails on Canva.com after pipeline completes
+- Setup: Run `python main.py` directly on home machine (no Claude Code session)
+
+**Automatic Fallback Logic:**
+```python
+# agents/thumbnail.py
+if canva_mcp_available:
+    thumbnail_url = canva_mcp.generate(prompt)  # Return image URL
+else:
+    # Home machine mode: return brief for manual creation
+    return {
+        'status': 'brief_only',
+        'brief': 'Detailed visual description...',
+        'canva_prompt': 'Canva-optimized prompt...',
+        'instructions': 'Create on Canva.com using this prompt'
+    }
+```
+
+**At Setup Time:**
+- Cloud/automated deployment (AWS, GitHub Actions, etc.): Uses Canva MCP (thumbnails auto-generated)
+- Home machine local runs: Uses brief-only mode (manual thumbnail creation)
+- No configuration needed: Detects automatically and adapts
+
+**For Home Machine Users:**
+1. Run pipeline: `python main.py`
+2. Video production completes (7 MP4s with all features)
+3. Thumbnail generation creates briefs
+4. Check `output/[video]_thumbnail_manifest.json` for briefs
+5. Log into Canva.com and use briefs/prompts to create thumbnails
+6. Download thumbnails and place in output folder
+7. Proceed to Step 9: Output Packaging
+
+**Expected Manifest Format (Brief-Only Mode):**
+```json
+{
+  "status": "partial",
+  "generated_count": 0,
+  "brief_only_count": 7,
+  "thumbnails": [
+    {
+      "status": "brief_only",
+      "brief": "Gaming glitch moment - pixelated broken screen...",
+      "canva_prompt": "YouTube thumbnail: gaming glitch, high contrast...",
+      "instructions": "Create on Canva.com using this prompt"
+    },
+    ...
+  ]
+}
+```
+
+### Quality Control Validation - Step 6
+
+Quality Control validates all pipeline outputs before proceeding to packaging. It performs three-tier validation:
+
+**Tier 1: Video File Validation**
+- Codec: h264 required (YouTube Shorts standard)
+- Resolution: Exactly 1080x1920 pixels (9:16 vertical format)
+- Aspect Ratio: 9:16 (verified from resolution)
+- Duration: 10-120 seconds (YouTube Shorts limits)
+- File Size: 500KB-100MB (sanity check)
+- Audio Presence: Video must have audio track
+- Audio Sync: Voiceover duration must match video duration (±1 second)
+
+**Tier 2: Metadata Validation**
+- Clip Manifest: Must have 7 top_clip_indices, all clips present with scores
+- SEO Manifest: Must have best_title, hashtags (10-15), keywords (10+ phrases), tags (5-8)
+- Video Manifest: Must have video_paths (7 videos), codec info, processing_times
+- Thumbnail Manifest: Must have status ('generated' or 'brief_only'), generated_count + brief_only_count = 7
+
+**Tier 3: Routing Decision**
+- **PASS**: All videos valid, all metadata complete → Proceed to Step 7 (Output Packaging)
+- **WARNING**: Videos valid, minor metadata gaps detected → Log warnings, continue with best-effort
+- **ERROR**: Any video validation fails OR critical metadata missing → Route to manual_review queue
+
+**Manual Review Workflow:**
+When QC fails with errors:
+1. Check `output/[video]_qc_manifest.json` for specific validation errors
+2. Fix issues: regenerate videos, verify metadata completeness
+3. Re-run quality control: `python core/quality_control.py --video [path] --manifest [path]`
+4. Proceed to Step 7 once QC passes
+
+**QC Manifest Output:**
+```json
+{
+  "status": "pass|warning|error",
+  "routing": "pass|manual_review",
+  "timestamp": "2026-07-02T12:00:00+00:00",
+  "video_validation": {
+    "total_checked": 7,
+    "passed": 7,
+    "failed": 0,
+    "errors": []
+  },
+  "metadata_validation": {
+    "clip_manifest": {"status": "valid"},
+    "seo_manifest": {"status": "valid", "warnings": ["hashtags_less_than_15"]},
+    "video_manifest": {"status": "valid"},
+    "thumbnail_manifest": {"status": "valid"}
+  },
+  "warnings": ["Minor metadata gaps detected"],
+  "qc_notes": "All video files passed codec/resolution/duration checks"
+}
+```
 
 ### YouTube API quota exceeded
 - Build tracks quota in `data/quota_tracker.json`
