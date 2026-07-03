@@ -70,7 +70,7 @@ class Pipeline:
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.checkpoint = PipelineCheckpoint(video_path)
+        self.checkpoint = PipelineCheckpoint(video_path, checkpoint_dir=str(self.data_dir / 'checkpoints'))
         self.processing_log = {
             'video_path': str(video_path),
             'started_at': datetime.now().isoformat(),
@@ -374,13 +374,19 @@ class Pipeline:
 
 def run_pipeline(video_path):
     """
-    Convenience function to run the pipeline
-    
+    Convenience function to run the pipeline.
+    Reads DATA_DIR / OUTPUT_DIR from the environment (set in .env) so
+    configured paths actually take effect, falling back to ./data and
+    ./output if unset.
+
     Args:
         video_path: Path to video file
-    
+
     Returns:
         dict: Pipeline results
     """
-    pipeline = Pipeline(video_path)
+    import os
+    data_dir = os.getenv('DATA_DIR', './data')
+    output_dir = os.getenv('OUTPUT_DIR', './output')
+    pipeline = Pipeline(video_path, data_dir=data_dir, output_dir=output_dir)
     return pipeline.run()

@@ -33,16 +33,19 @@ def verify_environment():
     """Verify required environment variables and dependencies"""
     required_vars = ['ANTHROPIC_API_KEY', 'YOUTUBE_API_KEY']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
-    
+
     if missing_vars:
         logger.error(f"Missing environment variables: {', '.join(missing_vars)}")
         logger.error("Please update your .env file")
         return False
-    
-    # Verify directories
-    for directory in ['input', 'output', 'data']:
-        Path(directory).mkdir(exist_ok=True)
-    
+
+    # Verify directories at the CONFIGURED paths (INPUT_DIR/OUTPUT_DIR/DATA_DIR),
+    # not hardcoded relative names - so .env path configuration actually takes effect
+    for env_var, default in [('INPUT_DIR', './input'), ('OUTPUT_DIR', './output'), ('DATA_DIR', './data')]:
+        directory = os.getenv(env_var, default)
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        logger.info(f"  {env_var}: {directory}")
+
     logger.info("✓ Environment verification passed")
     return True
 
