@@ -21,6 +21,7 @@ class PipelineStep(Enum):
     THUMBNAIL = 5
     QUALITY_CONTROL = 6
     OUTPUT_PACKAGING = 7
+    PIPELINE_AUDIT = 8
 
 
 class PipelineCheckpoint:
@@ -89,6 +90,37 @@ class Pipeline:
             'details': details or {}
         }
         logger.info(f"📊 Step {step.name}: {status}")
+
+    def _save_step_timing(self, batch_folder: str):
+        """
+        Persists self.processing_log's per-step timing to the packaged
+        batch folder as manifests/pipeline_timing.json - this data
+        previously only ever existed in-memory (returned by run_pipeline()
+        but never written to disk), so nothing that runs after the
+        process exits - like the Pipeline Auditor, which reads an
+        already-packaged batch folder rather than in-process state, same
+        design as core/publisher.py - could see per-step processing times.
+        """
+        try:
+            started_at = self.processing_log.get('started_at')
+            total_wall_clock_seconds = None
+            if started_at:
+                total_wall_clock_seconds = (datetime.now() - datetime.fromisoformat(started_at)).total_seconds()
+
+            timing_data = {
+                'batch_id': self.batch_id,
+                'video_path': str(self.video_path),
+                'started_at': started_at,
+                'total_wall_clock_seconds': total_wall_clock_seconds,
+                'steps': self.processing_log.get('steps', {})
+            }
+            timing_path = Path(batch_folder) / 'manifests' / 'pipeline_timing.json'
+            timing_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(timing_path, 'w') as f:
+                json.dump(timing_data, f, indent=2, default=str)
+            logger.info(f"✓ Step timing saved: {timing_path}")
+        except Exception as e:
+            logger.warning(f"⚠ Could not save step timing (non-fatal): {e}")
 
     def should_recover(self):
         """Check if recovery is needed"""
@@ -505,7 +537,41 @@ class Pipeline:
                 'videos_organized': packaging_result.get('packaging_result', {}).get('videos_organized'),
                 'ready_for_upload': packaging_result.get('ready_for_upload')
             })
-            
+
+            # Step 8: Pipeline Audit - analyzes the just-packaged batch and
+            # writes audit_report.md/audit_log.json into the batch folder.
+            # Runs automatically, no manual trigger. A failure here (Claude
+            # unavailable, unexpected manifest shape, etc.) must never fail
+            # the overall pipeline run - the batch is already fully
+            # produced and packaged by this point, the audit is a QA layer
+            # on top of a result that already succeeded.
+            logger.info("Step 8/8: Pipeline Audit")
+            self.log_step(PipelineStep.PIPELINE_AUDIT, 'in_progress')
+            try:
+                batch_folder = packaging_result.get('batch_folder')
+                if batch_folder:
+                    self._save_step_timing(batch_folder)
+
+                    from agents.pipeline_auditor import audit_batch
+                    audit_result = audit_batch(batch_folder)
+                    self.step_outputs['pipeline_audit'] = audit_result
+
+                    if audit_result.get('status') == 'success':
+                        self.log_step(PipelineStep.PIPELINE_AUDIT, 'complete', {
+                            'overall_score': audit_result.get('overall_score'),
+                            'overall_status': audit_result.get('overall_status')
+                        })
+                    else:
+                        self.log_step(PipelineStep.PIPELINE_AUDIT, 'failed', {
+                            'error': audit_result.get('error')
+                        })
+                else:
+                    logger.warning("⚠ No batch_folder from packaging result, skipping audit")
+                    self.log_step(PipelineStep.PIPELINE_AUDIT, 'skipped', {'reason': 'no batch_folder'})
+            except Exception as e:
+                logger.exception("❌ Pipeline audit failed (non-fatal, batch was already produced successfully)")
+                self.log_step(PipelineStep.PIPELINE_AUDIT, 'failed', {'error': str(e)})
+
             # Pipeline complete
             logger.info("✅ Pipeline complete!")
             self.checkpoint.clear()

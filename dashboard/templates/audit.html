@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+{% block content %}
+<h1>Pipeline Audit</h1>
+
+{% if latest %}
+<div class="card">
+  <h2>Latest Batch: {{ latest.log.batch_id }}</h2>
+  <div class="grid grid-3">
+    <div class="stat">
+      <div class="label">Overall Status</div>
+      <div class="value">
+        {% if latest.log.overall_status == 'green' %}🟢 GREEN
+        {% elif latest.log.overall_status == 'yellow' %}🟡 YELLOW
+        {% elif latest.log.overall_status == 'red' %}🔴 RED
+        {% else %}—{% endif %}
+      </div>
+    </div>
+    <div class="stat">
+      <div class="label">Overall Score</div>
+      <div class="value">{{ latest.log.overall_score }}/100</div>
+    </div>
+    <div class="stat">
+      <div class="label">Shorts Audited</div>
+      <div class="value">{{ latest.log.shorts|length }}</div>
+    </div>
+  </div>
+
+  <h2 style="margin-top: 20px;">Per-Short Results</h2>
+  <table>
+    <thead><tr><th>Short</th><th>Status</th><th>Score</th><th>Notes</th></tr></thead>
+    <tbody>
+    {% for s in latest.log.shorts %}
+      <tr>
+        <td>{{ s.title }}</td>
+        <td>
+          {% if s.status == 'green' %}<span class="badge badge-ok">🟢 GREEN</span>
+          {% elif s.status == 'yellow' %}<span class="badge badge-warn">🟡 YELLOW</span>
+          {% elif s.status == 'red' %}<span class="badge badge-err">🔴 RED</span>
+          {% else %}<span class="badge badge-off">—</span>{% endif %}
+        </td>
+        <td>{{ s.score }}/100</td>
+        <td class="muted">{{ s.issues|join('; ') if s.issues else 'No issues found' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <div style="margin-top: 16px;">
+    <a class="btn" href="{{ url_for('audit_detail_route', folder=latest.folder) }}">Read Full Report</a>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <div class="empty-state">No audit reports yet - the Pipeline Auditor runs automatically after a batch finishes packaging. Produce a batch to see results here.</div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Audit Scores Over Time</h2>
+  {% if history|length > 1 %}
+    <canvas id="auditChart" height="80"></canvas>
+  {% else %}
+    <div class="empty-state">Need at least 2 audited batches to show a trend.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>All Audit Reports</h2>
+  {% if history %}
+    <table>
+      <thead><tr><th>Batch</th><th>Generated</th><th>Status</th><th>Score</th><th>Shorts</th></tr></thead>
+      <tbody>
+      {% for a in history %}
+        <tr>
+          <td><a href="{{ url_for('audit_detail_route', folder=a.folder) }}">{{ a.batch_id }}</a></td>
+          <td class="muted">{{ a.generated_at[:19] if a.generated_at else '—' }}</td>
+          <td>
+            {% if a.overall_status == 'green' %}<span class="badge badge-ok">🟢 GREEN</span>
+            {% elif a.overall_status == 'yellow' %}<span class="badge badge-warn">🟡 YELLOW</span>
+            {% elif a.overall_status == 'red' %}<span class="badge badge-err">🔴 RED</span>
+            {% else %}<span class="badge badge-off">—</span>{% endif %}
+          </td>
+          <td>{{ a.overall_score }}/100</td>
+          <td>{{ a.short_count }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">No audit reports yet.</div>
+  {% endif %}
+</div>
+
+{% if history|length > 1 %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+  const history = {{ history|tojson }}.slice().reverse();  // oldest first for a left-to-right timeline
+  const labels = history.map(a => a.batch_id.replace('batch_', ''));
+  const scores = history.map(a => a.overall_score);
+  const colors = history.map(a => a.overall_status === 'green' ? '#4fd17a' : a.overall_status === 'yellow' ? '#f5c542' : '#ff5c5c');
+
+  new Chart(document.getElementById('auditChart'), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Overall Score',
+        data: scores,
+        borderColor: '#4fd1c5',
+        pointBackgroundColor: colors,
+        pointRadius: 6,
+        tension: 0.2
+      }]
+    },
+    options: {
+      scales: { y: { min: 0, max: 100, title: { display: true, text: 'Score' } } }
+    }
+  });
+</script>
+{% endif %}
+{% endblock %}

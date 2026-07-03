@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Audit - {{ audit.log.batch_id }}{% endblock %}
+{% block content %}
+<h1>{{ audit.log.batch_id }}</h1>
+<p><a href="{{ url_for('audit_page') }}">&larr; back to Audit</a></p>
+
+<div class="card">
+  <div id="reportBody"></div>
+</div>
+
+<textarea id="rawMarkdown" style="display:none;">{{ audit.report_markdown }}</textarea>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+  const raw = document.getElementById('rawMarkdown').value;
+  document.getElementById('reportBody').innerHTML = marked.parse(raw);
+</script>
+
+<style>
+  #reportBody table { margin: 12px 0; }
+  #reportBody h1, #reportBody h2, #reportBody h3 { margin-top: 20px; }
+  #reportBody ul { padding-left: 20px; }
+</style>
+{% endblock %}

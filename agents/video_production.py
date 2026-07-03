@@ -549,10 +549,24 @@ class VideoProducer:
             for r in results if r.get('status') == 'success'
         ]
 
+        # Per-short features (which of captions/audio_ducking/color_grading/
+        # branding actually applied to THIS specific short, not just the
+        # batch-wide aggregate above) - the data was already computed per
+        # short in `results`, just not previously surfaced to callers.
+        # Keyed by short_number (string, for JSON-manifest consistency with
+        # the rest of this codebase's short-keyed dicts) so the Pipeline
+        # Auditor and other downstream consumers can look up exactly what
+        # happened to one specific short instead of only the batch average.
+        short_features = {
+            str(r.get('short_number')): r.get('features', [])
+            for r in results if r.get('status') == 'success'
+        }
+
         return {
             'status': batch_status,
             'video_paths': video_paths,
             'short_results': short_results,
+            'short_features': short_features,
             'timings': timings,
             'processing_times': {
                 'export_total': round(export_total, 2),

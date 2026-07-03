@@ -179,6 +179,53 @@ def _get_hook_viral_scores_for_batch(batch_id: str) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Audit - agents/pipeline_auditor.py's per-batch audit_log.json/audit_report.md
+# ---------------------------------------------------------------------------
+
+def get_audit_batches() -> List[Dict]:
+    """Every batch folder that has an audit_log.json, newest first."""
+    if not OUTPUT_DIR.exists():
+        return []
+    audits = []
+    for d in sorted(OUTPUT_DIR.glob('batch_*'), reverse=True):
+        log_data = _read_json(d / 'audit_log.json', None)
+        if not log_data:
+            continue
+        audits.append({
+            'batch_id': log_data.get('batch_id', d.name),
+            'folder': d.name,
+            'generated_at': log_data.get('generated_at'),
+            'overall_score': log_data.get('overall_score', 0),
+            'overall_status': log_data.get('overall_status', 'unknown'),
+            'short_count': len(log_data.get('shorts', []))
+        })
+    return audits
+
+
+def get_audit_detail(folder: str) -> Optional[Dict]:
+    """One batch's full audit_log.json plus the raw audit_report.md markdown text."""
+    d = OUTPUT_DIR / folder
+    log_data = _read_json(d / 'audit_log.json', None)
+    if not log_data:
+        return None
+    report_path = d / 'audit_report.md'
+    try:
+        report_markdown = report_path.read_text() if report_path.exists() else ''
+    except Exception as e:
+        logger.warning(f"⚠ Could not read {report_path}: {e}")
+        report_markdown = ''
+    return {'folder': folder, 'log': log_data, 'report_markdown': report_markdown}
+
+
+def get_latest_audit() -> Optional[Dict]:
+    """Most recent batch that has an audit - None if no batch has been audited yet."""
+    audits = get_audit_batches()
+    if not audits:
+        return None
+    return get_audit_detail(audits[0]['folder'])
+
+
+# ---------------------------------------------------------------------------
 # Analytics - views/CTR/retention over time, top hooks, recent shorts
 # ---------------------------------------------------------------------------
 

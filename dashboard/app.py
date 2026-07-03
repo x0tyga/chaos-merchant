@@ -91,6 +91,24 @@ def output_detail(folder):
     return render_template('output_detail.html', batch=detail)
 
 
+@app.route('/audit')
+def audit_page():
+    return render_template(
+        'audit.html',
+        latest=data.get_latest_audit(),
+        history=data.get_audit_batches()
+    )
+
+
+@app.route('/audit/<folder>')
+def audit_detail_route(folder):
+    detail = data.get_audit_detail(folder)
+    if detail is None:
+        flash(f"Audit report not found for: {folder}", 'error')
+        return redirect(url_for('audit_page'))
+    return render_template('audit_detail.html', audit=detail)
+
+
 @app.route('/analytics')
 def analytics_page():
     return render_template(
