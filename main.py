@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 from agents.watcher import create_watcher
 from agents.trend_intelligence import generate_daily_trend_intelligence
 from agents.competitor_monitor import CompetitorMonitor
+from agents.analytics_feedback import run_analytics_feedback
+from agents.comment_mining import run_comment_mining
+from agents.thumbnail_research import run_thumbnail_research
 from core.pipeline import run_pipeline
 from core.scheduler import initialize_scheduler
 
@@ -141,6 +144,33 @@ def main():
         lambda: competitor_monitor.check_competitors(),
         3,
         quota_priority=50
+    )
+
+    # Register Analytics & Feedback - daily 9am, priority 30
+    # (48h/7d performance marks, spike detection, hook library score updates)
+    scheduler.schedule_job(
+        'analytics_feedback',
+        lambda: run_analytics_feedback(),
+        '09:00',
+        quota_priority=30
+    )
+
+    # Register Comment Mining - weekly Sunday 10am, priority 70
+    scheduler.schedule_weekly(
+        'comment_mining',
+        lambda: run_comment_mining(),
+        'sunday',
+        '10:00',
+        quota_priority=70
+    )
+
+    # Register Thumbnail Research - weekly Sunday 10am, priority 70
+    scheduler.schedule_weekly(
+        'thumbnail_research',
+        lambda: run_thumbnail_research(),
+        'sunday',
+        '10:00',
+        quota_priority=70
     )
 
     # Start scheduler in background thread

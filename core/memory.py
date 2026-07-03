@@ -444,6 +444,15 @@ class ChannelMemory:
                 )
             ''')
 
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS performance_checks (
+                    short_id INTEGER NOT NULL,
+                    mark TEXT NOT NULL,
+                    checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(short_id, mark)
+                )
+            ''')
+
             conn.commit()
             conn.close()
             logger.info("✓ Channel memory database schema initialized")
@@ -517,6 +526,112 @@ class ChannelMemory:
             return True
         except Exception as e:
             logger.error(f"❌ Failed to update performance: {e}")
+            return False
+
+    def mark_published(self, title: str, youtube_id: str) -> Optional[int]:
+        """
+        Link a channel_shorts row (matched by title, most recent match if
+        duplicates) to its real YouTube video ID once actually published,
+        and reset publish_date to this moment - add_short() sets
+        publish_date at pipeline/production time, which can differ from
+        when a short is actually uploaded. Called by the Publisher module.
+
+        Returns the short's internal id, or None if no title match found.
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                SELECT id FROM channel_shorts WHERE title = ? ORDER BY created_at DESC LIMIT 1
+            ''', (title,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                logger.warning(f"⚠ No channel_shorts entry found matching title: {title[:60]}")
+                return None
+
+            short_id = row[0]
+            cursor.execute('''
+                UPDATE channel_shorts SET youtube_id = ?, publish_date = ? WHERE id = ?
+            ''', (youtube_id, datetime.now().date(), short_id))
+            conn.commit()
+            conn.close()
+
+            logger.info(f"✓ Marked published [ID:{short_id}] YouTube:{youtube_id}")
+            return short_id
+        except sqlite3.IntegrityError:
+            logger.warning(f"⚠ youtube_id already linked to another short: {youtube_id}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Failed to mark published: {e}")
+            return None
+
+    def get_shorts_due_for_check(self, target_days_ago: int, tolerance_days: int = 1, mark: str = None) -> List[Dict]:
+        """
+        Shorts with a real youtube_id, published target_days_ago days ago
+        (+/- tolerance_days), that have NOT already been checked at this
+        mark (e.g. '48h', '7d') - so a daily job doesn't re-log the same
+        short's same checkpoint every time it runs. Returns [] on a fresh
+        channel with nothing published yet (no crash, no special-casing
+        needed by callers) or once every due short has already been checked.
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+
+            target_date = (datetime.now() - timedelta(days=target_days_ago)).date()
+            low = target_date - timedelta(days=tolerance_days)
+            high = target_date + timedelta(days=tolerance_days)
+
+            cursor.execute('''
+                SELECT id, youtube_id, title, topic, publish_date, hook_text
+                FROM channel_shorts
+                WHERE youtube_id IS NOT NULL AND publish_date BETWEEN ? AND ?
+            ''', (low, high))
+            candidates = cursor.fetchall()
+
+            due = []
+            for row in candidates:
+                short_id = row[0]
+                if mark:
+                    cursor.execute('''
+                        SELECT 1 FROM performance_checks WHERE short_id = ? AND mark = ?
+                    ''', (short_id, mark))
+                    if cursor.fetchone():
+                        continue  # already checked at this mark
+                due.append({
+                    'id': short_id, 'youtube_id': row[1], 'title': row[2],
+                    'topic': row[3], 'publish_date': row[4], 'hook_text': row[5]
+                })
+
+            conn.close()
+            return due
+        except Exception as e:
+            logger.error(f"❌ Failed to query shorts due for check: {e}")
+            return []
+
+    def mark_checked(self, short_id: int, mark: str) -> bool:
+        """Record that a short has been checked at a given mark ('48h', '7d')."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS performance_checks (
+                    short_id INTEGER NOT NULL,
+                    mark TEXT NOT NULL,
+                    checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(short_id, mark)
+                )
+            ''')
+            cursor.execute('''
+                INSERT OR IGNORE INTO performance_checks (short_id, mark) VALUES (?, ?)
+            ''', (short_id, mark))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to mark checked: {e}")
             return False
 
     def prevent_topic_repeat(self, days: int = 14) -> List[str]:

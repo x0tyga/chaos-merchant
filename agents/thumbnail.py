@@ -15,6 +15,24 @@ from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
 
+THUMBNAIL_PROMPT_GUIDANCE_PATH = Path('./prompts/thumbnail_prompt.txt')
+
+
+def _load_thumbnail_prompt_guidance() -> str:
+    """
+    Reads auto-maintained style guidance from prompts/thumbnail_prompt.txt,
+    written by agents/thumbnail_research.py's weekly trending-thumbnail
+    research pass. Returns '' if the file doesn't exist yet (fresh install,
+    or research hasn't accumulated enough data to write recommendations) -
+    the brief generator falls back to its built-in style rules below.
+    """
+    try:
+        if THUMBNAIL_PROMPT_GUIDANCE_PATH.exists():
+            return THUMBNAIL_PROMPT_GUIDANCE_PATH.read_text().strip()
+    except Exception as e:
+        logger.warning(f"⚠ Could not read thumbnail prompt guidance: {e}")
+    return ''
+
 
 class ThumbnailBriefGenerator:
     """Generates creative briefs and Canva prompts for thumbnails"""
@@ -39,6 +57,11 @@ class ThumbnailBriefGenerator:
         engagement_score = clip_data.get('engagement_score', 0.5)
         title = seo_data.get('best_title', 'Gaming Moment')
         keywords = seo_data.get('metadata', {}).get('keywords', [])
+        research_guidance = _load_thumbnail_prompt_guidance()
+        research_section = (
+            f"\nAdditional style guidance from trending thumbnail research:\n{research_guidance}\n"
+            if research_guidance else ""
+        )
 
         prompt = f"""Generate a YouTube Shorts thumbnail brief for a gaming video.
 
@@ -46,7 +69,7 @@ Video Title: {title}
 Keywords: {', '.join(keywords[:3])}
 Content Energy: {'HIGH' if engagement_score > 0.7 else 'MEDIUM' if engagement_score > 0.4 else 'LOW'}
 Script Snippet: {script[:100]}...
-
+{research_section}
 Create a JSON response with:
 1. "brief": 2-3 sentence visual description (what the thumbnail should show)
 2. "canva_prompt": Detailed prompt for Canva AI to generate the design (include colors, layout, text, style)
