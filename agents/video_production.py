@@ -13,11 +13,12 @@ import numpy as np
 import re
 
 try:
-    from moviepy.editor import (
+    # moviepy 2.x removed the moviepy.editor namespace entirely - everything
+    # is imported directly from the top-level moviepy package now.
+    from moviepy import (
         VideoFileClip, AudioFileClip, CompositeVideoClip, CompositeAudioClip,
-        ImageClip, TextClip, concatenate_videoclips
+        ImageClip, TextClip, concatenate_videoclips, vfx
     )
-    from moviepy.video.fx.resize import resize
 except ImportError:
     raise ImportError("moviepy required: pip install moviepy")
 
@@ -46,7 +47,7 @@ class ClipExtractor:
     def extract_clip(self, start_time: float, end_time: float) -> VideoFileClip:
         """Extract segment from source video"""
         try:
-            clip = self.video_clip.subclip(start_time, end_time)
+            clip = self.video_clip.subclipped(start_time, end_time)
             logger.info(f"✓ Extracted clip: {start_time:.1f}s - {end_time:.1f}s ({clip.duration:.1f}s)")
             return clip
         except Exception as e:
@@ -88,20 +89,20 @@ class VerticalReframer:
 
         if abs(source_ratio - cls.TARGET_RATIO) < 0.01:
             logger.info("✓ Video already 9:16 format")
-            return video_clip.resize((cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
+            return video_clip.resized((cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
 
         if method == 'crop' and source_ratio > cls.TARGET_RATIO:
             new_width = int(video_clip.h * cls.TARGET_RATIO)
             crop_x = (video_clip.w - new_width) // 2
-            cropped = video_clip.crop(x1=crop_x, y1=0, x2=crop_x + new_width, y2=video_clip.h)
+            cropped = video_clip.cropped(x1=crop_x, y1=0, x2=crop_x + new_width, y2=video_clip.h)
             logger.info(f"✓ Cropped from {video_clip.w}x{video_clip.h} to {new_width}x{video_clip.h}")
-            return cropped.resize((cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
+            return cropped.resized((cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
 
-        resized = video_clip.resize(height=cls.TARGET_HEIGHT)
+        resized = video_clip.resized(height=cls.TARGET_HEIGHT)
         x_offset = (cls.TARGET_WIDTH - resized.w) // 2
 
         black_bg = ImageClip(np.zeros((cls.TARGET_HEIGHT, cls.TARGET_WIDTH, 3), dtype=np.uint8))
-        final = CompositeVideoClip([black_bg, resized.set_position((x_offset, 0))],
+        final = CompositeVideoClip([black_bg, resized.with_position((x_offset, 0))],
                                   size=(cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
         logger.info(f"✓ Letterboxed to {cls.TARGET_WIDTH}x{cls.TARGET_HEIGHT}")
         return final
@@ -164,8 +165,8 @@ class CaptionSynchronizer:
                 duration = end_time - start_time
 
                 text_clip_kwargs = {
-                    'txt': text,
-                    'fontsize': self.CAPTION_FONT_SIZE,
+                    'text': text,
+                    'font_size': self.CAPTION_FONT_SIZE,
                     'color': self.CAPTION_COLOR,
                     'method': 'caption',
                     'size': (video_clip.w - 2 * self.SAFE_MARGIN, None)
@@ -176,8 +177,8 @@ class CaptionSynchronizer:
 
                 text_clip = TextClip(**text_clip_kwargs)
 
-                text_clip = text_clip.set_duration(duration).set_start(start_time)
-                text_clip = text_clip.set_position(('center', video_clip.h - self.SAFE_MARGIN - 100))
+                text_clip = text_clip.with_duration(duration).with_start(start_time)
+                text_clip = text_clip.with_position(('center', video_clip.h - self.SAFE_MARGIN - 100))
 
                 caption_clips.append(text_clip)
 
@@ -221,7 +222,25 @@ class AudioProcessor:
             logger.info(f"✓ Applying music ducking ({duck_db}dB during voiceover)...")
             duck_factor = 10 ** (duck_db / 20.0)
 
-            ducked = background_audio.volumex(lambda t: duck_factor if vo_start <= t <= vo_end else 1.0)
+            # moviepy 2.x dropped the volumex() clip method (it only ever
+            # accepted a constant scalar factor, not a time-varying one
+            # anyway - ducking needs the volume to change only during
+            # [vo_start, vo_end]). transform() is the 2.x replacement for
+            # the old fl() general frame-transform method and works on
+            # audio clips too: t may be a scalar or a batch array of times,
+            # so the factor is computed with np.where for elementwise safety.
+            def _duck_frame(get_frame, t):
+                frame = get_frame(t)
+                if np.isscalar(t):
+                    factor = duck_factor if vo_start <= t <= vo_end else 1.0
+                else:
+                    t_arr = np.asarray(t)
+                    factor = np.where((t_arr >= vo_start) & (t_arr <= vo_end), duck_factor, 1.0)
+                    if frame.ndim > 1:
+                        factor = factor[:, np.newaxis]
+                return frame * factor
+
+            ducked = background_audio.transform(_duck_frame)
             return ducked
 
         except Exception as e:
@@ -241,21 +260,21 @@ class AudioProcessor:
             # Position voiceover within the clip, trimming if it would run past the end
             if vo_duration > clip_duration - start_offset:
                 trimmed_duration = max(0.1, clip_duration - start_offset)
-                voiceover_audio = voiceover_audio.subclip(0, trimmed_duration)
+                voiceover_audio = voiceover_audio.subclipped(0, trimmed_duration)
                 logger.warning(f"⚠ Voiceover trimmed to fit clip ({vo_duration:.1f}s -> {trimmed_duration:.1f}s)")
             elif vo_duration < clip_duration - start_offset:
                 logger.info(f"ℹ Voiceover ({vo_duration:.1f}s) shorter than remaining clip time; background audio continues after voiceover ends")
 
-            voiceover_audio = voiceover_audio.set_start(start_offset)
+            voiceover_audio = voiceover_audio.with_start(start_offset)
             vo_end = start_offset + voiceover_audio.duration
 
             if video_clip.audio is not None:
                 logger.info("✓ Compositing voiceover with ducked background audio")
                 ducked_bg = self.apply_music_ducking(video_clip.audio, start_offset, vo_end)
-                final_audio = CompositeAudioClip([ducked_bg, voiceover_audio]).set_duration(clip_duration)
+                final_audio = CompositeAudioClip([ducked_bg, voiceover_audio]).with_duration(clip_duration)
             else:
                 logger.info("✓ Using voiceover as sole audio track (no background audio in source clip)")
-                final_audio = CompositeAudioClip([voiceover_audio]).set_duration(clip_duration)
+                final_audio = CompositeAudioClip([voiceover_audio]).with_duration(clip_duration)
 
             logger.info("✓ Audio preparation complete")
             return final_audio
@@ -292,7 +311,7 @@ class EffectsLayer:
                 frame = np.clip(frame, 0, 1) * 255.0
                 return frame.astype(np.uint8)
 
-            graded_clip = video_clip.fl(adjust_colors)
+            graded_clip = video_clip.transform(adjust_colors)
             logger.info("✓ Color grading applied (numpy-based)")
             return graded_clip
 
@@ -349,13 +368,13 @@ class BrandingOverlay:
             if watermark_array is None:
                 return video_clip
 
-            watermark_clip = ImageClip(watermark_array).set_duration(video_clip.duration)
+            watermark_clip = ImageClip(watermark_array).with_duration(video_clip.duration)
 
             x_pos = video_clip.w - cls.WATERMARK_SIZE[0] - cls.WATERMARK_MARGIN[0]
             y_pos = video_clip.h - cls.WATERMARK_SIZE[1] - cls.WATERMARK_MARGIN[1]
 
-            watermark_clip = watermark_clip.set_position((x_pos, y_pos))
-            watermark_clip = watermark_clip.fadein(0.3).fadeout(0.3)
+            watermark_clip = watermark_clip.with_position((x_pos, y_pos))
+            watermark_clip = watermark_clip.with_effects([vfx.FadeIn(0.3), vfx.FadeOut(0.3)])
 
             composite = CompositeVideoClip([video_clip, watermark_clip], size=video_clip.size)
             logger.info(f"✓ Applied branding watermark: '{channel_name}'")
@@ -383,7 +402,6 @@ class VideoExporter:
                 codec='libx264',
                 audio_codec='aac',
                 fps=30,
-                verbose=False,
                 logger=None,
                 preset=preset,
                 bitrate='6000k',
@@ -534,7 +552,7 @@ class VideoProducer:
             audio_processor = AudioProcessor(self.voiceover_result['voiceover']['audio_path'])
             voiceover_audio = audio_processor.load_voiceover()
             final_audio = audio_processor.prepare_audio(reframed_clip, voiceover_audio)
-            reframed_clip = reframed_clip.set_audio(final_audio)
+            reframed_clip = reframed_clip.with_audio(final_audio)
 
             logger.info(f"Step 4: Adding burned-in captions...")
             caption_sync = CaptionSynchronizer(self.script)
