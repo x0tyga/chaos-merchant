@@ -116,6 +116,7 @@ class KokoroTTS:
     def __init__(self):
         self.model_path = os.getenv('KOKORO_MODEL_PATH', 'kokoro-v1.0.onnx')
         self.voices_path = os.getenv('KOKORO_VOICES_PATH', 'voices-v1.0.bin')
+        self.default_voice = os.getenv('KOKORO_VOICE', 'af_bella')
         self.available = self._check_availability()
 
     def _check_availability(self):
@@ -208,13 +209,16 @@ class KokoroTTS:
         finally:
             np.load = original_load
 
-    def generate(self, text, voice='bella', output_path=None):
+    def generate(self, text, voice=None, output_path=None):
         """
         Generate voiceover using Kokoro TTS
 
         Args:
             text: Text to synthesize
-            voice: Voice name (bella, heart, nova, etc)
+            voice: Voice name. Valid kokoro-onnx v1.0 voices: af_heart,
+                af_bella, af_nicole, af_aoede, am_adam, am_michael,
+                bf_emma, bm_george. Defaults to KOKORO_VOICE env var
+                (default: af_bella) if not specified.
             output_path: Output WAV file path
 
         Returns:
@@ -222,6 +226,9 @@ class KokoroTTS:
         """
         if not self.available:
             raise RuntimeError("Kokoro TTS not available")
+
+        if voice is None:
+            voice = self.default_voice
 
         logger.info(f"🎙️  Generating voiceover with Kokoro ({voice})...")
 
