@@ -157,17 +157,8 @@ class KokoroTTS:
             raise
 
 
-# ============================================================================
-# PREMIUM UPGRADE: ElevenLabs support (commented out, available if needed)
-# To enable ElevenLabs as fallback premium voice:
-# 1. Set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env
-# 2. Uncomment ElevenLabsTTS class and VoiceoverComparison class below
-# 3. Change primary_engine='elevenlabs' in pipeline.py (if desired)
-# ============================================================================
-
-"""
 class ElevenLabsTTS:
-    \"\"\"ElevenLabs voice synthesis (premium, cloud-based, optional upgrade)\"\"\"
+    """ElevenLabs voice synthesis (premium, cloud-based, optional fallback)"""
 
     def __init__(self):
         self.api_key = os.getenv('ELEVENLABS_API_KEY')
@@ -175,18 +166,18 @@ class ElevenLabsTTS:
         self.available = bool(self.api_key and self.voice_id)
 
     def generate(self, text, output_path=None):
-        \"\"\"Generate voiceover using ElevenLabs API\"\"\"
+        """Generate voiceover using ElevenLabs API"""
         if not self.available:
-            raise RuntimeError("ElevenLabs not configured")
-        
-        logger.info(f"🎙️  Generating voiceover with ElevenLabs...")
-        
+            raise RuntimeError("ElevenLabs not configured (set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID)")
+
+        logger.info("🎙️  Generating voiceover with ElevenLabs...")
+
         try:
             import requests
-            
+
             if output_path is None:
                 output_path = f"/tmp/voiceover_elevenlabs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
-            
+
             url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
             headers = {
                 "xi-api-key": self.api_key,
@@ -200,17 +191,17 @@ class ElevenLabsTTS:
                     "similarity_boost": 0.75
                 }
             }
-            
-            response = requests.post(url, json=data, headers=headers)
-            
+
+            response = requests.post(url, json=data, headers=headers, timeout=60)
+
             if response.status_code != 200:
-                raise RuntimeError(f"ElevenLabs API error: {response.status_code}")
-            
+                raise RuntimeError(f"ElevenLabs API error: {response.status_code} {response.text[:200]}")
+
             with open(output_path, 'wb') as f:
                 f.write(response.content)
-            
+
             logger.info(f"✓ ElevenLabs voiceover saved: {output_path}")
-            
+
             return {
                 'status': 'success',
                 'engine': 'elevenlabs',
@@ -219,51 +210,108 @@ class ElevenLabsTTS:
                 'text_length': len(text),
                 'estimated_duration': len(text) / 150 * 60
             }
-            
+
         except Exception as e:
             logger.error(f"❌ ElevenLabs TTS failed: {e}")
             raise
-\"\"\"
 
+
+class VoiceoverComparison:
+    """
+    Generates the same text with both Kokoro and ElevenLabs (whichever are
+    available/configured) for side-by-side quality comparison.
+    Used by core/quality_test.py and test_voice_comparison.py.
+    """
+
+    @staticmethod
+    def compare(text: str, sample_name: str = 'test') -> dict:
+        """
+        Args:
+            text: Text to synthesize with both engines
+            sample_name: Identifier used to name output audio files
+
+        Returns:
+            dict: {'kokoro': {...}, 'elevenlabs': {...}} each with a 'status' key
+                  of 'success', 'error', or 'unavailable'
+        """
+        results = {}
+
+        kokoro = KokoroTTS()
+        if kokoro.available:
+            try:
+                output_path = f"/tmp/voiceover_compare_{sample_name}_kokoro.wav"
+                results['kokoro'] = kokoro.generate(text, output_path=output_path)
+            except Exception as e:
+                logger.warning(f"⚠️  Kokoro comparison sample failed: {e}")
+                results['kokoro'] = {'status': 'error', 'engine': 'kokoro', 'error': str(e)}
+        else:
+            results['kokoro'] = {'status': 'unavailable', 'engine': 'kokoro', 'error': 'Kokoro not installed'}
+
+        elevenlabs = ElevenLabsTTS()
+        if elevenlabs.available:
+            try:
+                output_path = f"/tmp/voiceover_compare_{sample_name}_elevenlabs.mp3"
+                results['elevenlabs'] = elevenlabs.generate(text, output_path=output_path)
+            except Exception as e:
+                logger.warning(f"⚠️  ElevenLabs comparison sample failed: {e}")
+                results['elevenlabs'] = {'status': 'error', 'engine': 'elevenlabs', 'error': str(e)}
+        else:
+            results['elevenlabs'] = {'status': 'unavailable', 'engine': 'elevenlabs', 'error': 'ElevenLabs not configured'}
+
+        return results
 
 
 def generate_voiceover(clip_data, trending_topics=None, channel_history=None):
     """
-    Main function to generate script and voiceover using Kokoro TTS (free, local)
-    
+    Main function to generate script and voiceover.
+    Primary: Kokoro TTS (free, local). Fallback: ElevenLabs (if configured).
+
     Args:
         clip_data: Clip intelligence manifest
         trending_topics: Trending topics for context
         channel_history: Previous video data
-    
+
     Returns:
         dict: Script + voiceover results
     """
     logger.info("🎬 Starting script + voiceover generation...")
-    
+
     # Generate script
     generator = ScriptGenerator()
     script_result = generator.generate_script(clip_data, trending_topics, channel_history)
-    
+
     if script_result['status'] != 'success':
         raise RuntimeError("Script generation failed")
-    
+
     script = script_result['script']
     full_text = script.get('full_script', '')
-    
-    # Generate voiceover with Kokoro (primary, free engine)
-    logger.info("Using Kokoro TTS (free, local voice synthesis)...")
-    tts = KokoroTTS()
-    
-    if not tts.available:
-        raise RuntimeError(
-            "❌ Kokoro TTS not available\n"
-            "Install with: pip install kokoro-tts\n"
-            "Or enable ElevenLabs premium upgrade (see script_voiceover.py for instructions)"
-        )
-    
-    voiceover_result = tts.generate(full_text)
-    
+
+    # Primary: Kokoro TTS (free, local)
+    voiceover_result = None
+    kokoro = KokoroTTS()
+
+    if kokoro.available:
+        try:
+            logger.info("Using Kokoro TTS (free, local voice synthesis)...")
+            voiceover_result = kokoro.generate(full_text)
+        except Exception as e:
+            logger.warning(f"⚠️  Kokoro failed: {e}")
+    else:
+        logger.warning("⚠️  Kokoro TTS not available")
+
+    # Fallback: ElevenLabs (only if Kokoro unavailable/failed and ElevenLabs configured)
+    if voiceover_result is None:
+        elevenlabs = ElevenLabsTTS()
+        if elevenlabs.available:
+            logger.info("Falling back to ElevenLabs premium voice synthesis...")
+            voiceover_result = elevenlabs.generate(full_text)
+        else:
+            raise RuntimeError(
+                "❌ No voiceover engine available\n"
+                "Install Kokoro with: pip install kokoro-tts\n"
+                "Or configure ElevenLabs: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env"
+            )
+
     return {
         'status': 'success',
         'script': script,

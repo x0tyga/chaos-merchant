@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import os
 
+logger = logging.getLogger(__name__)
+
 try:
     from anthropic import Anthropic
 except ImportError:
@@ -19,10 +21,10 @@ except ImportError:
 try:
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
+    GOOGLEAPICLIENT_AVAILABLE = True
 except ImportError:
-    logger.warning("googleapiclient not available - YouTube API will be unavailable")
-
-logger = logging.getLogger(__name__)
+    GOOGLEAPICLIENT_AVAILABLE = False
+    logger.warning("googleapiclient not available - YouTube API will be unavailable (pip install google-api-python-client)")
 
 
 class YouTubeCompetitorFetcher:
@@ -31,7 +33,9 @@ class YouTubeCompetitorFetcher:
     def __init__(self):
         self.api_key = os.getenv('YOUTUBE_API_KEY', '')
         self.youtube = None
-        if self.api_key:
+        if not GOOGLEAPICLIENT_AVAILABLE:
+            logger.warning("⚠ googleapiclient not installed - competitor monitoring will use fallback data")
+        elif self.api_key:
             try:
                 self.youtube = build('youtube', 'v3', developerKey=self.api_key)
             except Exception as e:

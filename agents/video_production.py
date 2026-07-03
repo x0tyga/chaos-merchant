@@ -13,7 +13,10 @@ import numpy as np
 import re
 
 try:
-    from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, ImageClip, TextClip, concatenate_videoclips
+    from moviepy.editor import (
+        VideoFileClip, AudioFileClip, CompositeVideoClip, CompositeAudioClip,
+        ImageClip, TextClip, concatenate_videoclips
+    )
     from moviepy.video.fx.resize import resize
 except ImportError:
     raise ImportError("moviepy required: pip install moviepy")
@@ -108,7 +111,7 @@ class CaptionSynchronizer:
     """Generates and syncs burned-in captions to voiceover"""
 
     CAPTION_FONT_SIZE = 48
-    CAPTION_COLOR = (255, 255, 255)
+    CAPTION_COLOR = 'white'
     CAPTION_BG_COLOR = (0, 0, 0)
     SAFE_MARGIN = 60
 
@@ -161,7 +164,7 @@ class CaptionSynchronizer:
                 duration = end_time - start_time
 
                 text_clip_kwargs = {
-                    'text': text,
+                    'txt': text,
                     'fontsize': self.CAPTION_FONT_SIZE,
                     'color': self.CAPTION_COLOR,
                     'method': 'caption',
@@ -208,23 +211,15 @@ class AudioProcessor:
             logger.error(f"❌ Failed to load voiceover: {e}")
             raise
 
-    def apply_music_ducking(self, background_audio: AudioFileClip, voiceover_audio: AudioFileClip,
-                           vo_start: float = 0.5, duck_db: float = -6.0) -> AudioFileClip:
+    def apply_music_ducking(self, background_audio: AudioFileClip, vo_start: float,
+                           vo_end: float, duck_db: float = -6.0) -> AudioFileClip:
         """
-        Reduce background music volume when voiceover plays
+        Reduce background music volume while the voiceover plays over [vo_start, vo_end]
         duck_db: reduction in dB (e.g., -6 = reduce to ~50% volume)
         """
         try:
             logger.info(f"✓ Applying music ducking ({duck_db}dB during voiceover)...")
-            vo_end = vo_start + voiceover_audio.duration
-
             duck_factor = 10 ** (duck_db / 20.0)
-
-            def volume_envelope(get_frame, t):
-                if vo_start <= t <= vo_end:
-                    return get_frame(t) * duck_factor
-                else:
-                    return get_frame(t)
 
             ducked = background_audio.volumex(lambda t: duck_factor if vo_start <= t <= vo_end else 1.0)
             return ducked
@@ -235,38 +230,32 @@ class AudioProcessor:
 
     def prepare_audio(self, video_clip: VideoFileClip, voiceover_audio: AudioFileClip,
                      start_offset: float = 0.5) -> AudioFileClip:
-        """Prepare final audio: voiceover + ducked background"""
+        """
+        Prepare final audio: voiceover mixed over ducked background music.
+        Background music is genuinely retained (ducked, not discarded) when present.
+        """
         try:
             vo_duration = voiceover_audio.duration
             clip_duration = video_clip.duration
 
-            if abs(vo_duration - clip_duration) > 1.0:
-                if vo_duration < clip_duration:
-                    logger.warning(f"⚠ Voiceover shorter than clip ({vo_duration:.1f}s < {clip_duration:.1f}s)")
-                else:
-                    trimmed = voiceover_audio.subclip(0, max(0, clip_duration - start_offset))
-                    voiceover_audio = trimmed.set_start(start_offset)
-            else:
-                voiceover_audio = voiceover_audio.set_start(start_offset)
+            # Position voiceover within the clip, trimming if it would run past the end
+            if vo_duration > clip_duration - start_offset:
+                trimmed_duration = max(0.1, clip_duration - start_offset)
+                voiceover_audio = voiceover_audio.subclip(0, trimmed_duration)
+                logger.warning(f"⚠ Voiceover trimmed to fit clip ({vo_duration:.1f}s -> {trimmed_duration:.1f}s)")
+            elif vo_duration < clip_duration - start_offset:
+                logger.info(f"ℹ Voiceover ({vo_duration:.1f}s) shorter than remaining clip time; background audio continues after voiceover ends")
+
+            voiceover_audio = voiceover_audio.set_start(start_offset)
+            vo_end = start_offset + voiceover_audio.duration
 
             if video_clip.audio is not None:
                 logger.info("✓ Compositing voiceover with ducked background audio")
-                ducked_bg = self.apply_music_ducking(video_clip.audio, voiceover_audio, start_offset)
-
-                from moviepy.audio.AudioFileClip import concatenate_audioclips
-                try:
-                    final_audio = CompositeVideoClip([video_clip.set_audio(ducked_bg)], 
-                                                    size=video_clip.size).audio
-                    if voiceover_audio.duration > 0:
-                        composite = CompositeVideoClip([video_clip.set_audio(voiceover_audio)],
-                                                      size=video_clip.size).audio
-                        final_audio = composite
-                except:
-                    final_audio = voiceover_audio
-
+                ducked_bg = self.apply_music_ducking(video_clip.audio, start_offset, vo_end)
+                final_audio = CompositeAudioClip([ducked_bg, voiceover_audio]).set_duration(clip_duration)
             else:
-                logger.info("✓ Using voiceover as sole audio track")
-                final_audio = voiceover_audio
+                logger.info("✓ Using voiceover as sole audio track (no background audio in source clip)")
+                final_audio = CompositeAudioClip([voiceover_audio]).set_duration(clip_duration)
 
             logger.info("✓ Audio preparation complete")
             return final_audio
@@ -455,6 +444,7 @@ class VideoProducer:
     def produce_all_shorts(self) -> Dict:
         """Produce all 7 shorts from top clips"""
         logger.info("🎬 Starting video production (Phase 2 - Full Features)...")
+        batch_start_time = datetime.now()
 
         results = []
         top_clip_indices = self.clip_manifest.get('top_clip_indices', [])
@@ -487,13 +477,24 @@ class VideoProducer:
         timings = {str(r.get('clip_idx')): r.get('duration', 0) for r in results if r.get('status') == 'success'}
         errors = [r.get('error') for r in results if r.get('status') == 'error']
 
+        # Aggregate real per-short processing times (previously hardcoded to 0)
+        per_short_times = [r.get('processing_time', 0) for r in results if r.get('processing_time') is not None]
+        export_total = sum(per_short_times)
+        batch_wall_clock = (datetime.now() - batch_start_time).total_seconds()
+
         logger.info(f"\n✅ Production complete: {len(video_paths)} of {len(top_clip_indices)} shorts produced")
+        logger.info(f"   Total export time: {export_total:.1f}s | Wall clock: {batch_wall_clock:.1f}s")
 
         return {
             'status': 'success' if video_paths else 'partial',
             'video_paths': video_paths,
             'timings': timings,
-            'processing_times': {'export_total': 0},
+            'processing_times': {
+                'export_total': round(export_total, 2),
+                'wall_clock_total': round(batch_wall_clock, 2),
+                'per_short': {str(r.get('clip_idx')): round(r.get('processing_time', 0), 2)
+                              for r in results if r.get('processing_time') is not None}
+            },
             'errors': errors,
             'metadata': {
                 'source_video': str(self.source_video_path),

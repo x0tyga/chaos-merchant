@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 import os
 
+logger = logging.getLogger(__name__)
+
 try:
     from anthropic import Anthropic
 except ImportError:
@@ -18,15 +20,17 @@ except ImportError:
 
 try:
     import praw
+    PRAW_AVAILABLE = True
 except ImportError:
-    logger.warning("praw not available - Reddit trends will be skipped")
+    PRAW_AVAILABLE = False
+    logger.warning("praw not available - Reddit trends will be skipped (pip install praw)")
 
 try:
     import feedparser
+    FEEDPARSER_AVAILABLE = True
 except ImportError:
-    logger.warning("feedparser not available - RSS feeds will be skipped")
-
-logger = logging.getLogger(__name__)
+    FEEDPARSER_AVAILABLE = False
+    logger.warning("feedparser not available - RSS feeds will be skipped (pip install feedparser)")
 
 
 class TrendFetcher:
@@ -97,13 +101,13 @@ class TrendFetcher:
         all_trends = []
 
         # Fetch Reddit trends
-        if 'praw' in locals():
+        if PRAW_AVAILABLE:
             reddit_trends = TrendFetcher.fetch_reddit_trends()
             for title, velocity, volume in reddit_trends:
                 all_trends.append((title, velocity, volume, 0.75, 24))
 
         # Fetch RSS trends
-        if 'feedparser' in locals():
+        if FEEDPARSER_AVAILABLE:
             rss_trends = TrendFetcher.fetch_rss_trends()
             for title, velocity, volume in rss_trends:
                 all_trends.append((title, velocity, volume, 0.70, 48))

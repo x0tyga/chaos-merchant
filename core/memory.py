@@ -43,6 +43,13 @@ class HookLibrary:
     Prevents repetition, enables diversity preservation, auto-generates variations
     """
 
+    # Minimum usage before a hook has enough signal to be judged proven/declining
+    MIN_USAGE_FOR_JUDGMENT = 3
+    PROVEN_WINNER_CTR = 0.08          # 8%+ CTR
+    PROVEN_WINNER_RETENTION = 0.50    # 50%+ retention at 30s
+    DECLINING_CTR = 0.02              # under 2% CTR
+    DECLINING_RETENTION = 0.15        # under 15% retention at 30s
+
     def __init__(self, db_path: str = './data/chaos_merchant.db'):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,8 +123,31 @@ class HookLibrary:
             logger.error(f"❌ Failed to add hook: {e}")
             return False
 
+    def _compute_status(self, usage_count: int, avg_ctr: float, avg_retention: float, current_status: str) -> str:
+        """
+        Determine hook status from performance data.
+        new -> testing (first use) -> proven_winner / declining (once enough data exists)
+        Retired hooks stay retired (auto_retire is the only way in/out of that state).
+        """
+        if current_status == 'retired':
+            return 'retired'
+
+        if usage_count < 1:
+            return 'new'
+
+        if usage_count < self.MIN_USAGE_FOR_JUDGMENT:
+            return 'testing'
+
+        if avg_ctr >= self.PROVEN_WINNER_CTR and avg_retention >= self.PROVEN_WINNER_RETENTION:
+            return 'proven_winner'
+
+        if avg_ctr < self.DECLINING_CTR or avg_retention < self.DECLINING_RETENTION:
+            return 'declining'
+
+        return 'testing'
+
     def record_usage(self, hook_id: int, short_id: str, title: str, ctr: float, retention: float) -> bool:
-        """Record hook performance data"""
+        """Record hook performance data and update its status (new -> testing -> proven_winner/declining)"""
         try:
             conn = sqlite3.connect(str(self.db_path))
             cursor = conn.cursor()
@@ -133,6 +163,13 @@ class HookLibrary:
                 SELECT AVG(ctr), AVG(retention_30s), COUNT(*) FROM hook_usage_log WHERE hook_id = ?
             ''', (hook_id,))
             avg_ctr, avg_retention, count = cursor.fetchone()
+            avg_ctr = avg_ctr or 0
+            avg_retention = avg_retention or 0
+
+            cursor.execute('SELECT status FROM hooks WHERE id = ?', (hook_id,))
+            row = cursor.fetchone()
+            current_status = row[0] if row else 'new'
+            new_status = self._compute_status(count, avg_ctr, avg_retention, current_status)
 
             cursor.execute('''
                 UPDATE hooks SET
@@ -140,18 +177,59 @@ class HookLibrary:
                     ctr = ?,
                     retention_30s = ?,
                     last_used = ?,
+                    status = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-            ''', (count, avg_ctr or 0, avg_retention or 0, datetime.now().date(), hook_id))
+            ''', (count, avg_ctr, avg_retention, datetime.now().date(), new_status, hook_id))
 
             conn.commit()
             conn.close()
 
-            logger.info(f"✓ Hook usage recorded [ID:{hook_id}] CTR:{ctr:.1%} Retention:{retention:.1%}")
+            status_change = f" [{current_status} -> {new_status}]" if new_status != current_status else f" [{new_status}]"
+            logger.info(f"✓ Hook usage recorded [ID:{hook_id}] CTR:{ctr:.1%} Retention:{retention:.1%}{status_change}")
             return True
         except Exception as e:
             logger.error(f"❌ Failed to record usage: {e}")
             return False
+
+    def auto_retire(self, retention_threshold: float = 0.15) -> int:
+        """
+        Retire hooks that have enough usage data but are performing below the
+        retention threshold. Retired hooks are excluded from get_top_performers()
+        and ensure_diversity() going forward.
+
+        Returns: number of hooks retired
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                SELECT id, text FROM hooks
+                WHERE status != 'retired'
+                  AND usage_count >= ?
+                  AND retention_30s < ?
+            ''', (self.MIN_USAGE_FOR_JUDGMENT, retention_threshold))
+
+            to_retire = cursor.fetchall()
+
+            if to_retire:
+                cursor.execute('''
+                    UPDATE hooks SET status = 'retired', updated_at = CURRENT_TIMESTAMP
+                    WHERE status != 'retired' AND usage_count >= ? AND retention_30s < ?
+                ''', (self.MIN_USAGE_FOR_JUDGMENT, retention_threshold))
+                conn.commit()
+
+            conn.close()
+
+            logger.info(f"✓ Auto-retire complete: {len(to_retire)} hook(s) retired (retention < {retention_threshold:.1%})")
+            for hook_id, text in to_retire:
+                logger.info(f"  - Retired [ID:{hook_id}]: {text[:50]}...")
+
+            return len(to_retire)
+        except Exception as e:
+            logger.error(f"❌ Failed to auto-retire hooks: {e}")
+            return 0
 
     def get_top_performers(self, limit: int = 5) -> List[Dict]:
         """Get highest performing hooks (proven winners)"""
@@ -394,16 +472,19 @@ class ChannelMemory:
             conn = sqlite3.connect(str(self.db_path))
             cursor = conn.cursor()
 
-            # Get percentile threshold
-            cursor.execute('''
-                SELECT ctr FROM channel_shorts
-                WHERE ctr > 0
-                ORDER BY ctr ASC
-                LIMIT 1 OFFSET (SELECT MAX((COUNT(*) * ?) / 100) FROM channel_shorts)
-            ''', (percentile,))
+            # Compute the percentile threshold in Python against the SAME filtered
+            # set (ctr > 0) used below, rather than mixing a COUNT(*) over all rows
+            # (including unmeasured ctr=0 shorts) with an OFFSET applied to a
+            # filtered subset - that mismatch used to make the offset overshoot
+            # and silently fall back to an arbitrary threshold.
+            cursor.execute('SELECT ctr FROM channel_shorts WHERE ctr > 0 ORDER BY ctr ASC')
+            measured_ctrs = [row[0] for row in cursor.fetchall()]
 
-            result = cursor.fetchone()
-            threshold = result[0] if result else 0.05
+            if measured_ctrs:
+                idx = min(int(len(measured_ctrs) * percentile / 100), len(measured_ctrs) - 1)
+                threshold = measured_ctrs[idx]
+            else:
+                threshold = 0.05
 
             # Get top performers
             cursor.execute('''

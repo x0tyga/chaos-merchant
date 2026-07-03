@@ -322,7 +322,8 @@ class ChaosScheduler:
             'running': self.running,
             'scheduled_jobs': list(self.scheduled_jobs.keys()),
             'quota_status': self.quota.get_status(),
-            'pending_jobs': len(schedule.idle_seconds) if hasattr(schedule, 'idle_seconds') else 'unknown'
+            'pending_jobs': len(schedule.jobs),
+            'next_run_seconds': schedule.idle_seconds if schedule.jobs else None
         }
 
 

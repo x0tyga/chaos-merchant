@@ -328,10 +328,17 @@ class ContentSimilarityValidator:
     """Checks against last 14 days of channel memory to flag recently covered topics"""
 
     @staticmethod
-    def check_topic_similarity(seo_manifest: Dict, channel_memory_dir: str = './data/channel_memory') -> Tuple[bool, Dict]:
+    def check_topic_similarity(seo_manifest: Dict, channel_memory_dir: str = './output',
+                              exclude_filename: str = None) -> Tuple[bool, Dict]:
         """
-        Compare current short topic/title against last 14 days of published shorts
-        Flag if topic similarity exceeds threshold (would indicate repeat content)
+        Compare current short topic/title against last 14 days of published shorts.
+        Flag if topic similarity exceeds threshold (would indicate repeat content).
+
+        NOTE: pipeline.py writes each video's SEO metadata directly to
+        {output_dir}/{video_stem}_seo_metadata.json, so that's what we scan by
+        default (not a separate ./channel_memory/ directory, which nothing ever
+        populates). exclude_filename should be set to the CURRENT video's own
+        seo_metadata filename so it doesn't get compared against itself.
 
         Returns:
             (is_unique, details)
@@ -366,6 +373,8 @@ class ContentSimilarityValidator:
 
             recent_shorts = []
             for manifest_file in channel_memory_path.glob('*_seo_metadata.json'):
+                if exclude_filename and manifest_file.name == exclude_filename:
+                    continue
                 try:
                     file_mtime = datetime.fromtimestamp(manifest_file.stat().st_mtime)
                     if file_mtime > cutoff_date:
@@ -787,7 +796,10 @@ class QualityController:
         logger.info("🔄 VALIDATION 3: Content Similarity Check (last 14 days)")
         logger.info("-" * 70)
 
-        is_unique, similarity_details = ContentSimilarityValidator.check_topic_similarity(seo_manifest, str(self.output_dir.parent / 'channel_memory'))
+        current_seo_filename = f"{video_base_name}_seo_metadata.json" if video_base_name else None
+        is_unique, similarity_details = ContentSimilarityValidator.check_topic_similarity(
+            seo_manifest, str(self.output_dir), exclude_filename=current_seo_filename
+        )
         results['content_similarity'].append(similarity_details)
 
         status_icon = "✓" if similarity_details['result'] == 'PASS' else ("⚠" if similarity_details['result'] == 'WARN' else ("❌" if similarity_details['result'] == 'FAIL' else "⊗"))
@@ -809,7 +821,7 @@ class QualityController:
                 results['status'] = 'warning'
             logger.warning(f"⚠ {warning_msg}")
 
-        logger.info()
+        logger.info(f"✓ Content similarity check complete\n")
 
         # ============================================================
         # VALIDATION 4: METADATA COMPLETENESS

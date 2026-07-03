@@ -99,6 +99,44 @@ class Pipeline:
             return PipelineStep(checkpoint['last_completed_step'] + 1)
         return PipelineStep.CLIP_INTELLIGENCE
 
+    def _load_trending_topics(self):
+        """
+        Load real trending topics written by the Trend Intelligence scheduler job
+        (agents/trend_intelligence.py -> ./data/trend_intelligence_latest.json).
+        Returns [] if no brief has been generated yet (e.g. scheduler hasn't run).
+        """
+        brief_path = self.data_dir / 'trend_intelligence_latest.json'
+        if not brief_path.exists():
+            logger.info("ℹ No trend intelligence brief found yet (scheduler may not have run) - proceeding with no trending topics")
+            return []
+
+        try:
+            with open(brief_path, 'r') as f:
+                brief_data = json.load(f)
+            top_trends = brief_data.get('brief', {}).get('top_trends', [])
+            topics = [t['trend'] for t in top_trends if t.get('trend')]
+            logger.info(f"✓ Loaded {len(topics)} real trending topics from trend intelligence")
+            return topics
+        except Exception as e:
+            logger.warning(f"⚠ Failed to load trend intelligence brief: {e}")
+            return []
+
+    def _load_channel_history(self):
+        """
+        Load real recently-published topics from Channel Memory (SQLite) to avoid
+        repeating content and give the script generator real context.
+        Returns [] on a fresh channel (no history yet) or on DB error.
+        """
+        try:
+            from core.memory import ChannelMemory
+            channel_memory = ChannelMemory(str(self.data_dir / 'chaos_merchant.db'))
+            recent_topics = channel_memory.prevent_topic_repeat(days=14)
+            logger.info(f"✓ Loaded {len(recent_topics)} recent topics from channel memory (14-day window)")
+            return recent_topics
+        except Exception as e:
+            logger.warning(f"⚠ Failed to load channel history: {e}")
+            return []
+
     def run(self):
         """
         Execute the complete pipeline
@@ -133,13 +171,16 @@ class Pipeline:
             # Step 2: Script + Voiceover
             logger.info("Step 2/7: Script Generation + Voiceover")
             self.log_step(PipelineStep.SCRIPT_VOICEOVER, 'in_progress')
-            
+
             from agents.script_voiceover import generate_voiceover
-            
+
+            trending_topics = self._load_trending_topics()
+            channel_history = self._load_channel_history()
+
             voiceover_result = generate_voiceover(
                 clip_manifest,
-                trending_topics=[],
-                channel_history=[]
+                trending_topics=trending_topics,
+                channel_history=channel_history
             )
             self.step_outputs['script_voiceover'] = voiceover_result
             
@@ -159,11 +200,11 @@ class Pipeline:
             self.log_step(PipelineStep.SEO_OPTIMIZER, 'in_progress')
             
             from agents.seo_optimizer import optimize_seo
-            
+
             seo_result = optimize_seo(
                 clip_manifest,
                 voiceover_result,
-                trending_topics=[]
+                trending_topics=trending_topics
             )
             self.step_outputs['seo_optimizer'] = seo_result
             

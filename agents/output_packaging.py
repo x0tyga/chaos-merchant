@@ -18,6 +18,105 @@ class BatchSummaryGenerator:
     """Generates 30-second-readable batch summary"""
 
     @staticmethod
+    def _aggregate_video_check(qc_inner: Dict, check_name: str) -> str:
+        """Aggregate a per-video check (e.g. 'resolution', 'duration', 'audio_sync') across all videos"""
+        videos = qc_inner.get('videos', [])
+        results = []
+        for v in videos:
+            for check in v.get('validation', {}).get('checks', []):
+                if check.get('check') == check_name:
+                    results.append(check.get('result', 'UNKNOWN'))
+
+        if not results:
+            return "⊗ NOT CHECKED"
+        if any(r == 'FAIL' for r in results):
+            failed = sum(1 for r in results if r == 'FAIL')
+            return f"❌ FAIL ({failed}/{len(results)} videos)"
+        if any(r == 'WARN' for r in results):
+            warned = sum(1 for r in results if r == 'WARN')
+            return f"⚠️ WARN ({warned}/{len(results)} videos)"
+        return f"✅ PASS ({len(results)}/{len(results)} videos)"
+
+    @staticmethod
+    def _aggregate_codec_check(qc_inner: Dict) -> str:
+        """Codec/audio_codec are validated as part of the video_production metadata check"""
+        for meta_val in qc_inner.get('metadata', []):
+            if meta_val.get('manifest_type') == 'video_production':
+                codec_errors = [e for e in meta_val.get('errors', []) if 'codec' in e.lower()]
+                if codec_errors:
+                    return f"❌ FAIL ({'; '.join(codec_errors)})"
+                return "✅ PASS"
+        return "⊗ NOT CHECKED"
+
+    @staticmethod
+    def _aggregate_caption_check(qc_inner: Dict) -> str:
+        captions = qc_inner.get('captions', [])
+        if not captions:
+            return "⊗ NOT CHECKED"
+        results = [c.get('details', {}).get('result', 'UNKNOWN') for c in captions]
+        if any(r == 'FAIL' for r in results):
+            failed = sum(1 for r in results if r == 'FAIL')
+            return f"❌ FAIL ({failed}/{len(results)} videos missing captions)"
+        return f"✅ PASS ({len(results)}/{len(results)} videos)"
+
+    @staticmethod
+    def _aggregate_similarity_check(qc_inner: Dict) -> str:
+        similarity = qc_inner.get('content_similarity', [])
+        if not similarity:
+            return "⊗ NOT CHECKED"
+        result = similarity[0].get('result', 'UNKNOWN')
+        similarity_pct = similarity[0].get('highest_similarity', 0)
+        if result == 'FAIL':
+            return f"❌ FAIL ({similarity_pct:.0%} similar to recent short)"
+        if result == 'WARN':
+            return f"⚠️ WARN ({similarity_pct:.0%} similar to recent short)"
+        if result == 'SKIP':
+            return "⊗ SKIPPED (no channel history yet)"
+        return "✅ PASS"
+
+    @staticmethod
+    def _aggregate_metadata_check(qc_inner: Dict) -> str:
+        metas = qc_inner.get('metadata', [])
+        if not metas:
+            return "⊗ NOT CHECKED"
+        statuses = [m.get('status', 'unknown') for m in metas]
+        if any(s == 'error' for s in statuses):
+            failed = [m['manifest_type'] for m in metas if m.get('status') == 'error']
+            return f"❌ FAIL ({', '.join(failed)})"
+        if any(s == 'warning' for s in statuses):
+            warned = [m['manifest_type'] for m in metas if m.get('status') == 'warning']
+            return f"⚠️ WARN ({', '.join(warned)})"
+        return "✅ PASS (all 4 manifests)"
+
+    @staticmethod
+    def build_quality_report_table(qc_result: Dict) -> str:
+        """Build the Quality Report table from REAL qc_result data (not hardcoded)"""
+        qc_inner = qc_result.get('qc_result', {}) or {}
+
+        rows = [
+            ("Video Codec (h264/aac)", BatchSummaryGenerator._aggregate_codec_check(qc_inner)),
+            ("Resolution (1080x1920)", BatchSummaryGenerator._aggregate_video_check(qc_inner, 'resolution')),
+            ("Duration (15-45s)", BatchSummaryGenerator._aggregate_video_check(qc_inner, 'duration')),
+            ("Audio Sync (±0.3s)", BatchSummaryGenerator._aggregate_video_check(qc_inner, 'audio_sync')),
+            ("Captions Burned-In", BatchSummaryGenerator._aggregate_caption_check(qc_inner)),
+            ("Content Uniqueness", BatchSummaryGenerator._aggregate_similarity_check(qc_inner)),
+            ("Metadata Complete", BatchSummaryGenerator._aggregate_metadata_check(qc_inner)),
+        ]
+
+        lines = ["| Check | Result |", "|-------|--------|"]
+        for name, result in rows:
+            lines.append(f"| {name} | {result} |")
+
+        overall_status = qc_result.get('status', 'unknown')
+        routing = qc_result.get('routing', 'unknown')
+        if routing == 'pass':
+            footer = "All validations passed. Ready for upload."
+        else:
+            footer = f"⚠️ QC status: {overall_status.upper()} — routed to **{routing}**. Review errors above before uploading."
+
+        return "\n".join(lines) + f"\n\n{footer}"
+
+    @staticmethod
     def create_readme(
         clip_manifest: Dict,
         seo_manifest: Dict,
@@ -102,6 +201,11 @@ class BatchSummaryGenerator:
 
         # Timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        quality_report_table = BatchSummaryGenerator.build_quality_report_table(qc_result)
+        routing = qc_result.get('routing', 'unknown')
+        ready_line = "Ready to publish. No manual intervention needed." if routing == 'pass' \
+            else f"NOT auto-cleared for publish (routing: {routing}). Review the Quality Report above before uploading."
 
         readme_content = f"""# Batch Upload Ready: {len(video_paths)} Shorts
 
@@ -205,22 +309,12 @@ batch_{timestamp}/
 
 ## 📊 Quality Report
 
-| Check | Result |
-|-------|--------|
-| Video Codec (h264) | ✅ PASS |
-| Resolution (1080x1920) | ✅ PASS |
-| Duration (15-45s) | ✅ PASS |
-| Audio Sync (±0.3s) | ✅ PASS |
-| Captions Burned-In | ✅ PASS |
-| Content Uniqueness | ✅ PASS |
-| Metadata Complete | ✅ PASS |
-
-All validations passed. Ready for upload.
+{quality_report_table}
 
 ---
 
 **Generated by Chaos Merchant Output Packaging Agent**
-**Ready to publish. No manual intervention needed.**
+**{ready_line}**
 """
 
         return readme_content
@@ -468,20 +562,39 @@ Steps:
         # ============================================================
         # 3. CREATE UPLOAD METADATA JSON
         # ============================================================
-        logger.info("\n📝 Creating upload metadata...")
+        logger.info("\n📝 Creating upload metadata (from real SEO results)...")
 
-        # This would normally come from full SEO results across all 7 shorts
-        # For now, create template structure
+        seo_meta = seo_manifest.get('metadata', {}) or {}
+        candidate_titles = seo_meta.get('titles', []) or []
+        best_title = seo_manifest.get('best_title', '')
+        description = seo_meta.get('description', '')
+        hashtags = seo_meta.get('hashtags', []) or []
+        tags = seo_meta.get('tags', []) or []
+        keywords = seo_meta.get('keywords', []) or []
+
+        if not candidate_titles and not best_title:
+            logger.warning("  ⚠ No SEO titles found in seo_manifest — upload metadata will have empty titles, verify Step 5 ran successfully")
+
         for i in range(len(video_paths)):
+            # NOTE: The pipeline currently generates one script + one SEO pass per
+            # source video, not per individual clip, so all 7 shorts share the same
+            # description/hashtags/tags/keywords. We distribute the SEO agent's 5
+            # candidate titles across the 7 shorts (cycling) so titles aren't
+            # identical, but this is real Claude-generated data, not per-clip metadata.
+            if candidate_titles:
+                title = candidate_titles[i % len(candidate_titles)]
+            else:
+                title = best_title or f"Untitled Short {i + 1}"
+
             metadata = {
                 "short_index": i + 1,
                 "file": f"short_{i + 1:03d}.mp4",
                 "thumbnail": f"thumbnail_{i + 1:03d}.jpg",
-                "title": f"Gaming Moment {i + 1}",  # Would be populated from SEO
-                "description": "An engaging gaming moment.\nSubscribe for more!",
-                "hashtags": ["#Gaming", "#Shorts", f"#Clip{i + 1}"],
-                "tags": ["Gaming", "Moments"],
-                "keywords": ["gaming", "moment"],
+                "title": title,
+                "description": description,
+                "hashtags": hashtags,
+                "tags": tags,
+                "keywords": keywords,
                 "publish_immediately": True,
                 "visibility": "Public"
             }
@@ -490,11 +603,11 @@ Steps:
             try:
                 with open(metadata_file, 'w') as f:
                     json.dump(metadata, f, indent=2)
-                logger.info(f"  ✓ {i + 1:03d}.json")
+                logger.info(f"  ✓ {i + 1:03d}.json (title: \"{title[:40]}\")")
             except Exception as e:
                 logger.error(f"  ❌ Failed to write metadata {i}: {e}")
 
-        logger.info(f"✓ Upload metadata created: {len(video_paths)} files")
+        logger.info(f"✓ Upload metadata created: {len(video_paths)} files (real SEO data)")
 
         # ============================================================
         # 4. COPY MANIFESTS
