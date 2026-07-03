@@ -7,6 +7,7 @@ Main entry point for the application
 import os
 import sys
 import logging
+import shutil
 import time
 from pathlib import Path
 from dotenv import load_dotenv
@@ -30,14 +31,67 @@ from core.scheduler import initialize_scheduler
 
 
 def verify_environment():
-    """Verify required environment variables and dependencies"""
+    """
+    Verify required environment variables and dependencies before starting.
+    Hard-blocks (exit) on anything the pipeline cannot run at all without;
+    warns loudly (but continues) on anything with a degraded-but-functional
+    fallback, so the failure is visible here instead of 40 minutes into a
+    pipeline run.
+    """
+    ok = True
+
+    # --- Hard blockers: no possible fallback exists for these ---
     required_vars = ['ANTHROPIC_API_KEY', 'YOUTUBE_API_KEY']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
-
     if missing_vars:
-        logger.error(f"Missing environment variables: {', '.join(missing_vars)}")
-        logger.error("Please update your .env file")
+        logger.error(f"❌ Missing required environment variable(s): {', '.join(missing_vars)}")
+        logger.error("   Fix: set these in your .env file")
+        ok = False
+
+    if not shutil.which('ffmpeg'):
+        logger.error("❌ ffmpeg not found in PATH - video export cannot run without it")
+        logger.error("   Fix (macOS): brew install ffmpeg")
+        ok = False
+
+    if not ok:
         return False
+
+    # --- Soft warnings: pipeline can still run, but degraded ---
+
+    # Voice synthesis: Kokoro (primary, needs package + valid model files) OR
+    # ElevenLabs (fallback, needs API key + voice ID). Mirrors the exact
+    # availability check generate_voiceover() uses at runtime - so this
+    # catches the same "no voiceover engine available" failure here instead
+    # of after Steps 1 completes.
+    kokoro_ready = False
+    try:
+        import kokoro_onnx  # noqa: F401
+        model_path = os.getenv('KOKORO_MODEL_PATH', 'kokoro-v1.0.onnx')
+        voices_path = os.getenv('KOKORO_VOICES_PATH', 'voices-v1.0.bin')
+        kokoro_ready = (
+            os.path.exists(model_path) and os.path.getsize(model_path) > 1_000_000
+            and os.path.exists(voices_path) and os.path.getsize(voices_path) > 1_000_000
+        )
+    except ImportError:
+        pass
+
+    elevenlabs_ready = bool(os.getenv('ELEVENLABS_API_KEY') and os.getenv('ELEVENLABS_VOICE_ID'))
+
+    if not kokoro_ready and not elevenlabs_ready:
+        logger.warning("⚠️  No voiceover engine available - pipeline WILL fail at Step 2 (Script + Voiceover)")
+        logger.warning("   Fix: run setup.sh to auto-download Kokoro's model files, or set")
+        logger.warning("        ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID in .env for the fallback engine")
+    elif not kokoro_ready:
+        logger.warning("⚠️  Kokoro (free, local) unavailable - falling back to ElevenLabs (paid) for every voiceover")
+
+    # Captions: moviepy's TextClip(method='caption') shells out to ImageMagick.
+    # There is no fallback - if this is missing, every short will silently
+    # ship with no captions (the exact bug from last night's first run).
+    if not (shutil.which('convert') or shutil.which('magick')):
+        logger.warning("⚠️  ImageMagick not found - captions will NOT render on any short produced")
+        logger.warning("   Fix (macOS): brew install imagemagick")
+        logger.warning("   If already installed and captions still fail, check policy.xml")
+        logger.warning("   (setup.sh attempts to auto-fix this - re-run it)")
 
     # Verify directories at the CONFIGURED paths (INPUT_DIR/OUTPUT_DIR/DATA_DIR),
     # not hardcoded relative names - so .env path configuration actually takes effect

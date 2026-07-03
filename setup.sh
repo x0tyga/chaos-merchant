@@ -41,13 +41,126 @@ else
     echo "✓ ImageMagick found"
 fi
 
-# Check for Kokoro TTS (not in requirements.txt, installed separately)
+# ImageMagick ships with a security policy that, on many distros/Homebrew
+# installs, denies the text/label/caption coders and @-file reads that
+# moviepy's TextClip(method='caption') needs - without this fix, captions
+# fail silently or with a PolicyError no matter how correct the code is.
+if [ "$IMAGEMAGICK_OK" -eq 1 ]; then
+    echo ""
+    echo "🔧 Checking ImageMagick policy.xml for caption-blocking rules..."
+    IM_POLICY_PATH=""
+    if [[ "$(uname)" == "Darwin" ]]; then
+        IM_POLICY_CANDIDATES=(
+            /opt/homebrew/etc/ImageMagick-7/policy.xml
+            /opt/homebrew/etc/ImageMagick-6/policy.xml
+            /usr/local/etc/ImageMagick-7/policy.xml
+            /usr/local/etc/ImageMagick-6/policy.xml
+        )
+    else
+        IM_POLICY_CANDIDATES=(
+            /etc/ImageMagick-7/policy.xml
+            /etc/ImageMagick-6/policy.xml
+            /etc/ImageMagick/policy.xml
+        )
+    fi
+    for candidate in "${IM_POLICY_CANDIDATES[@]}"; do
+        if [ -f "$candidate" ]; then
+            IM_POLICY_PATH="$candidate"
+            break
+        fi
+    done
+
+    if [ -n "$IM_POLICY_PATH" ]; then
+        # Match rights="none" rules on the patterns that block caption
+        # rendering: @ (reading external files as args), and the TEXT/
+        # LABEL/CAPTION coders (case-insensitive pattern names).
+        if grep -qEi 'rights="none"[^>]*pattern="(@\*?|text|label|caption)"' "$IM_POLICY_PATH" \
+           || grep -qEi 'pattern="(@\*?|text|label|caption)"[^>]*rights="none"' "$IM_POLICY_PATH"; then
+            echo "  ⚠ Found policy rule(s) blocking text/label/caption operations in $IM_POLICY_PATH"
+            cp "$IM_POLICY_PATH" "$IM_POLICY_PATH.bak.$(date +%s)" 2>/dev/null && \
+                echo "  📋 Backed up original policy.xml before editing"
+            echo "  🔧 Attempting automatic fix (requires sudo)..."
+            if [[ "$(uname)" == "Darwin" ]]; then
+                SED_FIX=(sudo sed -i '' -E 's/rights="none"([^>]*pattern="(@\*?|TEXT|LABEL|CAPTION)")/rights="read|write"\1/gI')
+            else
+                SED_FIX=(sudo sed -i -E 's/rights="none"([^>]*pattern="(@\*?|TEXT|LABEL|CAPTION)")/rights="read|write"\1/gI')
+            fi
+            if "${SED_FIX[@]}" "$IM_POLICY_PATH" 2>/dev/null; then
+                echo "  ✓ ImageMagick policy.xml patched - text/label/caption operations now allowed"
+            else
+                echo "  ❌ Could not patch automatically (sudo declined or sed failed). Fix manually:"
+                if [[ "$(uname)" == "Darwin" ]]; then
+                    echo "     sudo sed -i '' 's/rights=\"none\" pattern=\"@/rights=\"read|write\" pattern=\"@/' \"$IM_POLICY_PATH\""
+                else
+                    echo "     sudo sed -i 's/rights=\"none\" pattern=\"@/rights=\"read|write\" pattern=\"@/' \"$IM_POLICY_PATH\""
+                fi
+                echo "     (also check for rights=\"none\" pattern=\"TEXT|LABEL|CAPTION\" rules)"
+            fi
+        else
+            echo "  ✓ No caption-blocking policy rule found in $IM_POLICY_PATH"
+        fi
+    else
+        echo "  ℹ Could not locate policy.xml automatically. If captions fail with a"
+        echo "     PolicyError later, find it with: find / -name policy.xml 2>/dev/null"
+    fi
+fi
+
+# Check for Kokoro TTS (package now in requirements.txt; model files are NOT
+# pip-installable and must be downloaded separately)
 KOKORO_OK=1
 if ! python3 -c "import kokoro_onnx" &> /dev/null; then
     KOKORO_OK=0
     echo "⚠️  kokoro-onnx not installed (primary voice engine)"
 else
     echo "✓ kokoro-onnx found"
+fi
+
+# Download the Kokoro model files automatically if the package is present.
+# Both files come from the SAME release tag - mixing versions causes load
+# failures. A file under 1MB means a corrupted/interrupted download or a 404
+# response saved in place of the real binary (both produce a file that
+# *exists* but fails at load time with an opaque error), so re-download it.
+KOKORO_MODEL_PATH="${KOKORO_MODEL_PATH:-kokoro-v1.0.onnx}"
+KOKORO_VOICES_PATH="${KOKORO_VOICES_PATH:-voices-v1.0.bin}"
+KOKORO_MODEL_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+KOKORO_VOICES_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+KOKORO_MIN_BYTES=1000000
+
+download_kokoro_file() {
+    local url="$1" dest="$2" label="$3" size
+    if [ -f "$dest" ]; then
+        size=$(wc -c < "$dest" 2>/dev/null | tr -d ' ')
+        if [ "${size:-0}" -ge "$KOKORO_MIN_BYTES" ]; then
+            echo "  ✓ $label already present ($dest, ${size} bytes)"
+            return 0
+        fi
+        echo "  ⚠ $label exists but is only ${size:-0} bytes (corrupt/incomplete) - re-downloading"
+    fi
+    echo "  ⬇ Downloading $label..."
+    if curl -fL -o "$dest" "$url"; then
+        size=$(wc -c < "$dest" 2>/dev/null | tr -d ' ')
+        if [ "${size:-0}" -lt "$KOKORO_MIN_BYTES" ]; then
+            echo "  ❌ Downloaded $label is only ${size:-0} bytes - likely a 404 or interrupted transfer"
+            echo "     Check manually: curl -fL -o \"$dest\" \"$url\""
+            return 1
+        fi
+        echo "  ✓ $label downloaded (${size} bytes)"
+        return 0
+    else
+        echo "  ❌ Failed to download $label from $url"
+        return 1
+    fi
+}
+
+if [ "$KOKORO_OK" -eq 1 ]; then
+    echo ""
+    echo "📦 Checking Kokoro model files..."
+    KOKORO_MODEL_OK=1
+    download_kokoro_file "$KOKORO_MODEL_URL" "$KOKORO_MODEL_PATH" "kokoro-v1.0.onnx" || KOKORO_MODEL_OK=0
+    download_kokoro_file "$KOKORO_VOICES_URL" "$KOKORO_VOICES_PATH" "voices-v1.0.bin" || KOKORO_MODEL_OK=0
+    if [ "$KOKORO_MODEL_OK" -eq 0 ]; then
+        KOKORO_OK=0
+    fi
 fi
 
 # Create .env from example FIRST, so we have one source of truth for paths
@@ -138,13 +251,16 @@ if [ "$IMAGEMAGICK_OK" -eq 0 ]; then
 fi
 
 if [ "$KOKORO_OK" -eq 0 ]; then
-    echo "$STEP. Install Kokoro TTS (REQUIRED unless you're using ElevenLabs only):"
-    echo "     pip install kokoro-onnx"
-    echo "     Then download BOTH model files from the SAME release tag"
-    echo "     (mixing versions causes load failures):"
-    echo "       wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
-    echo "       wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
-    echo "     and set KOKORO_MODEL_PATH / KOKORO_VOICES_PATH in .env to their paths"
+    echo "$STEP. Kokoro TTS setup is incomplete (REQUIRED unless using ElevenLabs only)."
+    echo "     kokoro-onnx is now in requirements.txt (installed above), and this script"
+    echo "     already attempted to auto-download the model files via curl - check the"
+    echo "     'Checking Kokoro model files' output above for why that failed, then either"
+    echo "     re-run this script or download manually:"
+    echo "       curl -fL -o kokoro-v1.0.onnx $KOKORO_MODEL_URL"
+    echo "       curl -fL -o voices-v1.0.bin $KOKORO_VOICES_URL"
+    echo "     Verify neither file is suspiciously small (should be several MB+):"
+    echo "       ls -la kokoro-v1.0.onnx voices-v1.0.bin"
+    echo "     Then set KOKORO_MODEL_PATH / KOKORO_VOICES_PATH in .env to their paths"
     STEP=$((STEP+1))
     echo ""
 fi
