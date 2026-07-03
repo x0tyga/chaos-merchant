@@ -188,7 +188,6 @@ class Pipeline:
                 source_video_path=str(self.video_path),
                 clip_manifest=self.step_outputs['clip_intelligence'],
                 voiceover_result=self.step_outputs['script_voiceover'],
-                script_data=self.step_outputs['script_voiceover'],
                 output_dir=str(self.output_dir),
                 temp_dir=str(self.output_dir / 'temp')
             )
@@ -248,7 +247,8 @@ class Pipeline:
                 seo_manifest=self.step_outputs['seo_optimizer'],
                 video_manifest=self.step_outputs['video_production'],
                 thumbnail_manifest=self.step_outputs['thumbnail'],
-                output_dir=str(self.output_dir)
+                output_dir=str(self.output_dir),
+                video_base_name=self.video_path.stem
             )
             self.step_outputs['quality_control'] = qc_result
 

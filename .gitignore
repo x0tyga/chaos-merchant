@@ -39,6 +39,7 @@ env/
 
 # Data and processing
 data/chaos_merchant.db
+data/backups/
 input/*
 output/*
 *.log

@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 # Import agents and core
 from agents.watcher import create_watcher
+from agents.trend_intelligence import generate_daily_trend_intelligence
+from agents.competitor_monitor import CompetitorMonitor
 from core.pipeline import run_pipeline
+from core.scheduler import initialize_scheduler
 
 
 def verify_environment():
@@ -59,17 +62,40 @@ def main():
     logger.info("=" * 60)
     logger.info("🎬 Chaos Merchant - Starting")
     logger.info("=" * 60)
-    
+
     if not verify_environment():
         sys.exit(1)
-    
+
+    # Initialize scheduler with agent registration
+    scheduler = initialize_scheduler()
+
+    # Register Trend Intelligence - daily 7am, priority 10
+    scheduler.schedule_job(
+        'trend_intelligence',
+        lambda: generate_daily_trend_intelligence(),
+        '07:00',
+        quota_priority=10
+    )
+
+    # Register Competitor Monitor - every 3 hours, priority 50
+    competitor_monitor = CompetitorMonitor(quota_tracker=scheduler.quota)
+    scheduler.schedule_every_n_hours(
+        'competitor_monitor',
+        lambda: competitor_monitor.check_competitors(),
+        3,
+        quota_priority=50
+    )
+
+    # Start scheduler in background thread
+    scheduler_thread = scheduler.run_in_thread()
+
     # Create and start watcher
     input_dir = os.getenv('INPUT_DIR', './input')
     logger.info(f"📁 Input directory: {input_dir}")
-    
+
     watcher = create_watcher(input_dir, on_new_video=on_new_video)
     watcher.start()
-    
+
     # Scan for existing videos
     existing = watcher.scan_existing()
     if existing:

@@ -16,7 +16,95 @@ try:
 except ImportError:
     raise ImportError("anthropic SDK required: pip install anthropic")
 
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+except ImportError:
+    logger.warning("googleapiclient not available - YouTube API will be unavailable")
+
 logger = logging.getLogger(__name__)
+
+
+class YouTubeCompetitorFetcher:
+    """Fetches real competitor data from YouTube API"""
+
+    def __init__(self):
+        self.api_key = os.getenv('YOUTUBE_API_KEY', '')
+        self.youtube = None
+        if self.api_key:
+            try:
+                self.youtube = build('youtube', 'v3', developerKey=self.api_key)
+            except Exception as e:
+                logger.warning(f"⚠ YouTube API initialization failed: {e}")
+
+    def get_channel_recent_uploads(self, channel_id: str, max_results: int = 5) -> List[Dict]:
+        """Fetch recent uploads from a competitor channel"""
+        if not self.youtube:
+            logger.warning("⚠ YouTube API not available")
+            return []
+
+        try:
+            # Get uploads playlist for channel
+            channel_response = self.youtube.channels().list(
+                part='contentDetails',
+                id=channel_id
+            ).execute()
+
+            if not channel_response.get('items'):
+                logger.warning(f"⚠ Channel not found: {channel_id}")
+                return []
+
+            uploads_playlist_id = channel_response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+
+            # Get recent videos from uploads playlist
+            videos_response = self.youtube.playlistItems().list(
+                part='snippet',
+                playlistId=uploads_playlist_id,
+                maxResults=max_results
+            ).execute()
+
+            videos = []
+            for item in videos_response.get('items', []):
+                video_id = item['snippet']['resourceId']['videoId']
+                videos.append({
+                    'video_id': video_id,
+                    'title': item['snippet']['title'],
+                    'published_at': item['snippet']['publishedAt'],
+                    'thumbnail': item['snippet']['thumbnails'].get('high', {}).get('url', '')
+                })
+
+            logger.info(f"✓ Fetched {len(videos)} recent uploads from {channel_id}")
+            return videos
+
+        except HttpError as e:
+            logger.warning(f"⚠ YouTube API error for {channel_id}: {e}")
+            return []
+
+    def get_video_stats(self, video_id: str) -> Optional[Dict]:
+        """Get view count and engagement stats for a video"""
+        if not self.youtube:
+            return None
+
+        try:
+            response = self.youtube.videos().list(
+                part='statistics',
+                id=video_id
+            ).execute()
+
+            if not response.get('items'):
+                return None
+
+            stats = response['items'][0]['statistics']
+            return {
+                'video_id': video_id,
+                'views': int(stats.get('viewCount', 0)),
+                'likes': int(stats.get('likeCount', 0)),
+                'comments': int(stats.get('commentCount', 0))
+            }
+
+        except HttpError as e:
+            logger.warning(f"⚠ Could not fetch stats for {video_id}: {e}")
+            return None
 
 
 class CompetitorAlert:
@@ -153,6 +241,7 @@ class CompetitorMonitor:
         self.quota_tracker = quota_tracker
         self.alert_generator = CompetitorAlert()
         self.config_path = Path('./config/competitors.json')
+        self.youtube_fetcher = YouTubeCompetitorFetcher()
         self._init_config()
 
     def _init_config(self):
@@ -198,25 +287,58 @@ class CompetitorMonitor:
 
         alerts = []
 
-        # Mock check: in production would use YouTube API
-        mock_viral_videos = [
-            {
-                'channel': 'ExampleGaming1',
-                'title': 'GTA6 NEW EXPLOIT BREAKS EVERYTHING',
-                'video_id': 'mock_viral_001',
-                'views_gained': 25000,
-                'category': 'glitch'
-            },
-            {
-                'channel': 'ExampleGaming2',
-                'title': 'Speedrunner finds impossible skip',
-                'video_id': 'mock_viral_002',
-                'views_gained': 8000,
-                'category': 'speedrun'
-            }
-        ]
+        # Fetch real videos from YouTube API, or use fallback mock if API unavailable
+        viral_videos = []
 
-        for video in mock_viral_videos:
+        # Try to fetch real competitor data
+        if self.youtube_fetcher.youtube:
+            for competitor in competitors:
+                channel_id = competitor.get('channel_id', '')
+                channel_name = competitor.get('channel', '')
+
+                # Get recent uploads
+                recent_videos = self.youtube_fetcher.get_channel_recent_uploads(channel_id, max_results=5)
+
+                for video in recent_videos:
+                    # Get current view count
+                    stats = self.youtube_fetcher.get_video_stats(video['video_id'])
+                    if stats:
+                        # Calculate approximate views gained (proxy: view count / time since upload)
+                        published_at = datetime.fromisoformat(video['published_at'].replace('Z', '+00:00'))
+                        hours_since_upload = (datetime.now(published_at.tzinfo) - published_at).total_seconds() / 3600
+                        if hours_since_upload > 0.5:  # Only if video is at least 30 min old
+                            views_gained = int(stats['views'] / max(hours_since_upload, 1))
+                            viral_videos.append({
+                                'channel': channel_name,
+                                'title': video['title'],
+                                'video_id': video['video_id'],
+                                'views_gained': views_gained,
+                                'category': competitor.get('category', 'gaming')
+                            })
+
+            logger.info(f"✓ Fetched {len(viral_videos)} videos from {len(competitors)} competitors")
+
+        # Fallback to mock data if API unavailable
+        if not viral_videos:
+            logger.info("ℹ YouTube API unavailable, using fallback mock data")
+            viral_videos = [
+                {
+                    'channel': 'ExampleGaming1',
+                    'title': 'GTA6 NEW EXPLOIT BREAKS EVERYTHING',
+                    'video_id': 'mock_viral_001',
+                    'views_gained': 25000,
+                    'category': 'glitch'
+                },
+                {
+                    'channel': 'ExampleGaming2',
+                    'title': 'Speedrunner finds impossible skip',
+                    'video_id': 'mock_viral_002',
+                    'views_gained': 8000,
+                    'category': 'speedrun'
+                }
+            ]
+
+        for video in viral_videos:
             views_gained = video['views_gained']
 
             # Check thresholds

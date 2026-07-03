@@ -282,30 +282,33 @@ class EffectsLayer:
     @staticmethod
     def apply_color_grading(video_clip: VideoFileClip, contrast: float = 1.2,
                            saturation: float = 1.1) -> VideoFileClip:
-        """Apply color grading: contrast boost + saturation boost via ffmpeg filter"""
+        """Apply color grading: contrast boost + saturation boost (numpy-based, macOS compatible)"""
         try:
             logger.info(f"✓ Applying color grading (contrast: {contrast}x, saturation: {saturation}x)")
 
-            eq_filter = f"eq=contrast={contrast}:saturation={saturation}"
-            video_with_effects = video_clip.video.write_videofile(
-                "temp_graded.mp4",
-                codec='libx264',
-                audio_codec='aac',
-                fps=30,
-                vf=eq_filter,
-                verbose=False,
-                logger=None
-            )
+            def adjust_colors(get_frame, t):
+                """Apply contrast and saturation adjustment to frame"""
+                frame = get_frame(t)
+                # Normalize to 0-1 range
+                frame = frame.astype(np.float32) / 255.0
+                # Apply contrast: (value - 0.5) * contrast + 0.5
+                frame = (frame - 0.5) * contrast + 0.5
+                # Apply saturation in RGB space
+                # Convert to HSV, adjust V channel, convert back
+                gray = np.dot(frame[..., :3], [0.299, 0.587, 0.114])
+                frame_rgb = frame[..., :3]
+                frame_rgb = gray[:, :, np.newaxis] + saturation * (frame_rgb - gray[:, :, np.newaxis])
+                frame[..., :3] = frame_rgb
+                # Clip to valid range and convert back to uint8
+                frame = np.clip(frame, 0, 1) * 255.0
+                return frame.astype(np.uint8)
 
-            graded_clip = VideoFileClip("temp_graded.mp4")
-            if video_clip.audio:
-                graded_clip = graded_clip.set_audio(video_clip.audio)
-
-            logger.info("✓ Color grading applied")
+            graded_clip = video_clip.fl(adjust_colors)
+            logger.info("✓ Color grading applied (numpy-based)")
             return graded_clip
 
         except Exception as e:
-            logger.warning(f"⚠ Color grading filter failed: {e}, using original video")
+            logger.warning(f"⚠ Color grading adjustment failed: {e}, using original video")
             return video_clip
 
 
