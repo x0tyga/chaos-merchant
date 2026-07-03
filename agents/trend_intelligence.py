@@ -32,16 +32,36 @@ except ImportError:
     FEEDPARSER_AVAILABLE = False
     logger.warning("feedparser not available - RSS feeds will be skipped (pip install feedparser)")
 
+try:
+    # There is no stable official public Google Trends API. pytrends_modern
+    # is an actively-maintained fork of the original "pytrends" scraper
+    # (which hasn't shipped a release since April 2023, and Google's
+    # internal endpoints it scrapes change often enough that an unmaintained
+    # scraper is likely broken). Same TrendReq/build_payload/related_queries
+    # API as legacy pytrends, just a different import path. Best-effort only
+    # - it's an unofficial scraper with no SLA, treated the same as Reddit/
+    # RSS: real when it works, silently skipped when it doesn't.
+    from pytrends_modern import TrendReq
+    PYTRENDS_AVAILABLE = True
+except ImportError:
+    PYTRENDS_AVAILABLE = False
+    logger.warning("pytrends_modern not available - Google Trends will be skipped (pip install pytrends-modern)")
+
 
 class TrendFetcher:
     """Fetches real trends from multiple sources"""
 
-    REDDIT_SUBREDDITS = ['GTA6', 'grandtheftauto', 'gaming']
+    REDDIT_SUBREDDITS = ['GTA6', 'grandtheftauto', 'GrandTheftAutoVI', 'gaming', 'sports']
     RSS_FEEDS = [
         'https://www.polygon.com/rss/index.xml',
         'https://feeds.ign.com/ign/all',
         'https://kotaku.com/rss',
+        'https://www.espn.com/espn/rss/news',  # confirmed official ESPN feed
+        # RockstarIntel: no publicly discoverable/verifiable RSS feed URL
+        # found - not adding a guessed URL here. If you have the real feed
+        # URL, add it to this list.
     ]
+    GOOGLE_TRENDS_SEED_KEYWORDS = ['GTA6', 'gaming']
 
     @staticmethod
     def fetch_reddit_trends() -> List[Tuple[str, float, int]]:
@@ -96,6 +116,54 @@ class TrendFetcher:
             return []
 
     @staticmethod
+    def fetch_google_trends_rising() -> List[Tuple[str, float, int]]:
+        """
+        Fetch rising related queries for gaming seed keywords via Google
+        Trends. Unofficial/best-effort (see PYTRENDS_AVAILABLE comment) -
+        failures here are expected occasionally and handled the same way
+        as Reddit/RSS: logged and skipped, not fatal.
+        """
+        trends = []
+        try:
+            pytrends = TrendReq(hl='en-US', tz=360)
+            for keyword in TrendFetcher.GOOGLE_TRENDS_SEED_KEYWORDS:
+                try:
+                    pytrends.build_payload(kw_list=[keyword], timeframe='now 7-d')
+                    related = pytrends.related_queries()
+                    rising_df = (related or {}).get(keyword, {}).get('rising')
+                    if rising_df is None or rising_df.empty:
+                        continue
+
+                    for _, row in rising_df.head(5).iterrows():
+                        query = str(row.get('query', '')).strip()
+                        if not query:
+                            continue
+                        raw_value = row.get('value', 0)
+                        # Google reports uncapped/brand-new growth as the
+                        # literal string "Breakout" instead of a number
+                        if isinstance(raw_value, str) and raw_value.strip().lower() == 'breakout':
+                            velocity, volume = 1.0, 10000
+                        else:
+                            try:
+                                value = float(raw_value)
+                            except (TypeError, ValueError):
+                                value = 0.0
+                            velocity = min(value / 100.0, 1.0)  # 'value' is a % increase
+                            volume = int(value) * 100  # rough proxy, same scale as Reddit/RSS
+
+                        trends.append((query, velocity, volume))
+
+                    logger.info(f"✓ Fetched {len(rising_df)} rising queries for '{keyword}'")
+                except Exception as e:
+                    logger.warning(f"⚠ Could not fetch Google Trends for '{keyword}': {e}")
+                    continue
+
+            return trends[:15]
+        except Exception as e:
+            logger.warning(f"⚠ Google Trends unavailable: {e}")
+            return []
+
+    @staticmethod
     def get_trends() -> List[Tuple[str, float, int, float, int]]:
         """Fetch all trends from configured sources"""
         all_trends = []
@@ -111,6 +179,12 @@ class TrendFetcher:
             rss_trends = TrendFetcher.fetch_rss_trends()
             for title, velocity, volume in rss_trends:
                 all_trends.append((title, velocity, volume, 0.70, 48))
+
+        # Fetch Google Trends (unofficial, best-effort - see PYTRENDS_AVAILABLE)
+        if PYTRENDS_AVAILABLE:
+            google_trends = TrendFetcher.fetch_google_trends_rising()
+            for title, velocity, volume in google_trends:
+                all_trends.append((title, velocity, volume, 0.80, 12))
 
         # Fallback: provide diversified gaming trends if APIs unavailable
         if not all_trends:
@@ -258,14 +332,49 @@ VIRAL_WINDOW: 24"""
         return brief
 
 
+def _load_gaming_calendar() -> Dict:
+    """
+    Load the upcoming gaming/content calendar from config/gaming_calendar.json.
+    No API can fetch "when is the next Game Awards" reliably, so instead of
+    hardcoding dates in this file (which just go stale silently), this is
+    genuinely user-editable config - auto-created with generic placeholder
+    defaults on first run (same pattern as competitor_monitor.py's
+    config/competitors.json), edited directly to stay current.
+    """
+    config_path = Path('./config/gaming_calendar.json')
+    if not config_path.exists():
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        default_calendar = {
+            'upcoming': [],
+            'note': (
+                'Add upcoming gaming/content events here as {"date": "...", '
+                '"event": "..."} or plain strings - nothing fetches these '
+                'automatically, this file is the source of truth. Edit it '
+                'directly to keep it current.'
+            )
+        }
+        with open(config_path, 'w') as f:
+            json.dump(default_calendar, f, indent=2)
+        logger.info(f"✓ Created gaming calendar config (empty - add events manually): {config_path}")
+        return default_calendar
+
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"⚠ Failed to load gaming calendar config: {e}")
+        return {'upcoming': []}
+
+
 def generate_daily_trend_intelligence(channel_memory_recent_topics: List[str] = None) -> Dict:
     """
     Generate daily 7am trend intelligence brief
 
     Fetches real trends from:
-    - Reddit (r/GTA6, r/grandtheftauto, r/gaming)
-    - RSS feeds (Polygon, IGN, Kotaku)
-    - Fallback mock trends if APIs unavailable
+    - Reddit (r/GTA6, r/grandtheftauto, r/GrandTheftAutoVI, r/gaming, r/sports)
+    - RSS feeds (Polygon, IGN, Kotaku, ESPN)
+    - Google Trends rising queries (unofficial, best-effort)
+    - Fallback mock trends only if ALL of the above are unavailable
 
     Returns: Daily brief with scored trends + Chaos Merchant angles
     """
@@ -291,14 +400,7 @@ def generate_daily_trend_intelligence(channel_memory_recent_topics: List[str] = 
         scored_trends.append(scored)
         logger.info(f"  ✓ {trend_text} (score: {scored['composite_score']:.1%}, window: {window}h)")
 
-    # Mock gaming calendar
-    gaming_calendar = {
-        'upcoming': [
-            'GTA6 release Q1 2025',
-            'Game Awards 2026 voting begins',
-            'Summer Game Fest 2026'
-        ]
-    }
+    gaming_calendar = _load_gaming_calendar()
 
     # Generate brief
     intel = TrendIntelligence()
