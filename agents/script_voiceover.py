@@ -134,6 +134,33 @@ class KokoroTTS:
             )
             return False
 
+        # Sanity-check the ONNX model isn't a truncated download, an HTML
+        # error page, or a git-lfs pointer file saved in place of the real
+        # binary. All of those produce a file that *exists* but fails at
+        # load time with onnxruntime's opaque "INVALID_PROTOBUF: ...
+        # Protobuf parsing failed" instead of a clear "file missing" error.
+        # A real kokoro onnx model is tens to hundreds of MB.
+        model_size = os.path.getsize(self.model_path)
+        if model_size < 1_000_000:
+            logger.warning(
+                f"⚠️  KOKORO_MODEL_PATH ({self.model_path}) is only {model_size} bytes - "
+                f"too small to be a real ONNX model, so it will fail to load with a "
+                f"Protobuf parsing error. This usually means the download was "
+                f"interrupted, or an HTML error page / git-lfs pointer got saved instead "
+                f"of the actual binary. Re-download with: wget "
+                f"https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+            )
+            return False
+
+        if os.path.basename(self.model_path) not in ('kokoro-v1.0.onnx', 'kokoro-v1.0.fp16.onnx', 'kokoro-v1.0.int8.onnx'):
+            logger.warning(
+                f"⚠️  KOKORO_MODEL_PATH points at '{os.path.basename(self.model_path)}', not a "
+                f"recognized kokoro-v1.0.* filename. If this is the legacy kokoro-v0_19.onnx "
+                f"model, it predates the current voices-v1.0.bin format and the two are not "
+                f"guaranteed compatible - update KOKORO_MODEL_PATH to a v1.0 model from: "
+                f"https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0"
+            )
+
         return True
 
     @staticmethod
@@ -167,6 +194,17 @@ class KokoroTTS:
         np.load = _load_allow_pickle
         try:
             return Kokoro(model_path, voices_path)
+        except Exception as e:
+            if 'protobuf' in str(e).lower():
+                raise RuntimeError(
+                    f"Kokoro ONNX model at {model_path} is not a valid ONNX model "
+                    f"(protobuf parsing failed): {e}\n"
+                    f"The file is corrupted, truncated, or the wrong file was saved at "
+                    f"this path (e.g. an HTML error page or git-lfs pointer instead of "
+                    f"the real binary). Delete it and re-download: wget "
+                    f"https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+                ) from e
+            raise
         finally:
             np.load = original_load
 
