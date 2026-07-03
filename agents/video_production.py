@@ -182,8 +182,11 @@ class CaptionSynchronizer:
 
                 caption_clips.append(text_clip)
 
-            except Exception as e:
-                logger.warning(f"⚠ Caption rendering failed for segment: {e}")
+            except Exception:
+                # logger.exception captures the full traceback, not just
+                # str(e) - the difference between "ImageMagick policy denied
+                # text operations" being visible vs. silently discarded.
+                logger.exception("⚠ Caption rendering failed for segment")
                 continue
 
         if caption_clips:
@@ -213,10 +216,14 @@ class AudioProcessor:
             raise
 
     def apply_music_ducking(self, background_audio: AudioFileClip, vo_start: float,
-                           vo_end: float, duck_db: float = -6.0) -> AudioFileClip:
+                           vo_end: float, duck_db: float = -6.0) -> Tuple[AudioFileClip, bool]:
         """
         Reduce background music volume while the voiceover plays over [vo_start, vo_end]
         duck_db: reduction in dB (e.g., -6 = reduce to ~50% volume)
+
+        Returns: (audio_clip, applied) - applied is False if ducking failed
+        and the original unducked audio was returned instead, so callers
+        can report accurately instead of assuming success.
         """
         try:
             logger.info(f"✓ Applying music ducking ({duck_db}dB during voiceover)...")
@@ -241,17 +248,20 @@ class AudioProcessor:
                 return frame * factor
 
             ducked = background_audio.transform(_duck_frame)
-            return ducked
+            return ducked, True
 
-        except Exception as e:
-            logger.warning(f"⚠ Music ducking failed: {e}, using original audio")
-            return background_audio
+        except Exception:
+            logger.exception("⚠ Music ducking failed, using original audio")
+            return background_audio, False
 
     def prepare_audio(self, video_clip: VideoFileClip, voiceover_audio: AudioFileClip,
-                     start_offset: float = 0.5) -> AudioFileClip:
+                     start_offset: float = 0.5) -> Tuple[AudioFileClip, bool]:
         """
         Prepare final audio: voiceover mixed over ducked background music.
         Background music is genuinely retained (ducked, not discarded) when present.
+
+        Returns: (audio_clip, ducking_applied) - ducking_applied is False if
+        there was no background audio to duck, or ducking itself failed.
         """
         try:
             vo_duration = voiceover_audio.duration
@@ -270,17 +280,18 @@ class AudioProcessor:
 
             if video_clip.audio is not None:
                 logger.info("✓ Compositing voiceover with ducked background audio")
-                ducked_bg = self.apply_music_ducking(video_clip.audio, start_offset, vo_end)
+                ducked_bg, ducking_applied = self.apply_music_ducking(video_clip.audio, start_offset, vo_end)
                 final_audio = CompositeAudioClip([ducked_bg, voiceover_audio]).with_duration(clip_duration)
             else:
                 logger.info("✓ Using voiceover as sole audio track (no background audio in source clip)")
                 final_audio = CompositeAudioClip([voiceover_audio]).with_duration(clip_duration)
+                ducking_applied = False
 
             logger.info("✓ Audio preparation complete")
-            return final_audio
+            return final_audio, ducking_applied
 
-        except Exception as e:
-            logger.error(f"❌ Audio preparation failed: {e}")
+        except Exception:
+            logger.exception("❌ Audio preparation failed")
             raise
 
 
@@ -315,8 +326,8 @@ class EffectsLayer:
             logger.info("✓ Color grading applied (numpy-based)")
             return graded_clip
 
-        except Exception as e:
-            logger.warning(f"⚠ Color grading adjustment failed: {e}, using original video")
+        except Exception:
+            logger.exception("⚠ Color grading adjustment failed, using original video")
             return video_clip
 
 
@@ -352,8 +363,8 @@ class BrandingOverlay:
             logger.info(f"✓ Created watermark: '{channel_name}'")
             return np.array(img)
 
-        except Exception as e:
-            logger.warning(f"⚠ Watermark creation failed: {e}")
+        except Exception:
+            logger.exception("⚠ Watermark creation failed")
             return None
 
     @classmethod
@@ -380,8 +391,8 @@ class BrandingOverlay:
             logger.info(f"✓ Applied branding watermark: '{channel_name}'")
             return composite
 
-        except Exception as e:
-            logger.error(f"❌ Branding failed: {e}")
+        except Exception:
+            logger.exception("❌ Branding failed")
             return video_clip
 
 
@@ -483,7 +494,7 @@ class VideoProducer:
                 result = self.produce_single_short(clip_idx, i)
                 results.append(result)
             except Exception as e:
-                logger.error(f"❌ Short {i+1} failed: {e}")
+                logger.exception(f"❌ Short {i+1} failed")
                 results.append({
                     'status': 'error',
                     'clip_idx': clip_idx,
@@ -500,11 +511,28 @@ class VideoProducer:
         export_total = sum(per_short_times)
         batch_wall_clock = (datetime.now() - batch_start_time).total_seconds()
 
-        logger.info(f"\n✅ Production complete: {len(video_paths)} of {len(top_clip_indices)} shorts produced")
+        num_expected = len(top_clip_indices)
+        num_produced = len(video_paths)
+        if num_produced == 0:
+            batch_status = 'error'
+        elif num_produced < num_expected:
+            batch_status = 'partial'
+        else:
+            batch_status = 'success'
+
+        logger.info(f"\n✅ Production complete: {num_produced} of {num_expected} shorts produced (status: {batch_status})")
         logger.info(f"   Total export time: {export_total:.1f}s | Wall clock: {batch_wall_clock:.1f}s")
 
+        # Aggregate real per-short 'features' into what applied across ALL
+        # successful shorts vs. what applied in AT LEAST ONE - a feature
+        # applied in 0/7 shorts (e.g. captions never once succeeding) is a
+        # much stronger signal than the old hardcoded list ever surfaced.
+        per_short_feature_sets = [set(r.get('features', [])) for r in results if r.get('status') == 'success']
+        features_in_all_shorts = sorted(set.intersection(*per_short_feature_sets)) if per_short_feature_sets else []
+        features_in_any_short = sorted(set.union(*per_short_feature_sets)) if per_short_feature_sets else []
+
         return {
-            'status': 'success' if video_paths else 'partial',
+            'status': batch_status,
             'video_paths': video_paths,
             'timings': timings,
             'processing_times': {
@@ -516,12 +544,15 @@ class VideoProducer:
             'errors': errors,
             'metadata': {
                 'source_video': str(self.source_video_path),
+                'total_shorts_expected': num_expected,
                 'total_shorts': len(video_paths),
                 'total_duration': sum(timings.values()),
                 'codec': 'h264',
                 'audio_codec': 'aac',
                 'resolution': '1080x1920',
-                'features': ['captions', 'audio_ducking', 'color_grading', 'branding']
+                'features_requested': ['captions', 'audio_ducking', 'color_grading', 'branding'],
+                'features_applied_in_all_shorts': features_in_all_shorts,
+                'features_applied_in_any_short': features_in_any_short
             },
             'timestamp': datetime.now().isoformat()
         }
@@ -551,20 +582,29 @@ class VideoProducer:
             logger.info(f"Step 3: Preparing audio (voiceover + music ducking)...")
             audio_processor = AudioProcessor(self.voiceover_result['voiceover']['audio_path'])
             voiceover_audio = audio_processor.load_voiceover()
-            final_audio = audio_processor.prepare_audio(reframed_clip, voiceover_audio)
+            final_audio, ducking_applied = audio_processor.prepare_audio(reframed_clip, voiceover_audio)
             reframed_clip = reframed_clip.with_audio(final_audio)
 
             logger.info(f"Step 4: Adding burned-in captions...")
             caption_sync = CaptionSynchronizer(self.script)
             caption_timeline = caption_sync.generate_caption_timeline(voiceover_audio.duration)
             captioned_clip = caption_sync.render_captions(reframed_clip, caption_timeline)
+            # render_captions/apply_color_grading/apply_branding each return the
+            # SAME clip object unchanged on failure (or a no-op condition like no
+            # channel name) and a NEW composited/transformed object on success -
+            # identity comparison (matching the existing cleanup pattern below)
+            # gives an accurate applied/not-applied signal without changing
+            # every helper's return type.
+            captions_applied = captioned_clip is not reframed_clip
 
             logger.info(f"Step 5: Applying color grading...")
             effects = EffectsLayer()
             graded_clip = effects.apply_color_grading(captioned_clip, contrast=1.2, saturation=1.1)
+            color_grading_applied = graded_clip is not captioned_clip
 
             logger.info(f"Step 6: Adding channel branding...")
             branded_clip = BrandingOverlay.apply_branding(graded_clip, self.channel_name)
+            branding_applied = branded_clip is not graded_clip
 
             output_name = f"video_{self.source_video_path.stem}_{short_number:03d}.mp4"
             output_path = self.output_dir / output_name
@@ -587,6 +627,16 @@ class VideoProducer:
 
             elapsed = (datetime.now() - start_time).total_seconds()
 
+            applied_features = []
+            if captions_applied:
+                applied_features.append('captions')
+            if ducking_applied:
+                applied_features.append('audio_ducking')
+            if color_grading_applied:
+                applied_features.append('color_grading')
+            if branding_applied:
+                applied_features.append('branding')
+
             if is_valid:
                 return {
                     'status': 'success',
@@ -595,7 +645,11 @@ class VideoProducer:
                     'output_path': export_path,
                     'duration': extracted_clip.duration,
                     'processing_time': elapsed,
-                    'features': ['captions', 'audio_ducking', 'color_grading', 'branding']
+                    # Reflects what actually applied (see identity-comparison
+                    # checks above), not what was merely attempted - a step
+                    # can silently no-op on failure without killing the short.
+                    'features': applied_features,
+                    'features_requested': ['captions', 'audio_ducking', 'color_grading', 'branding']
                 }
             else:
                 return {
@@ -603,11 +657,13 @@ class VideoProducer:
                     'clip_idx': clip_idx,
                     'short_number': short_number,
                     'error': 'Output validation failed',
-                    'processing_time': elapsed
+                    'processing_time': elapsed,
+                    'features': applied_features,
+                    'features_requested': ['captions', 'audio_ducking', 'color_grading', 'branding']
                 }
 
         except Exception as e:
-            logger.error(f"❌ Short {short_number} production failed: {e}")
+            logger.exception(f"❌ Short {short_number} production failed")
             return {
                 'status': 'error',
                 'clip_idx': clip_idx,
