@@ -53,12 +53,26 @@ except ImportError:
 class TrendFetcher:
     """Fetches real trends from multiple sources"""
 
-    REDDIT_SUBREDDITS = ['GTA6', 'grandtheftauto', 'GrandTheftAutoVI', 'gaming', 'sports']
+    # Chaos Merchant covers chaotic/viral moments across any topic - GTA6
+    # subreddits are the current launch focus (timing + audience size), the
+    # rest cover the brand's actual scope: golf meltdowns, sports chaos,
+    # unexpected viral moments, and general internet culture.
+    REDDIT_SUBREDDITS = [
+        'GTA6', 'grandtheftauto', 'GrandTheftAutoVI', 'gaming', 'sports',
+        'golf', 'PublicFreakout', 'funny', 'nextfuckinglevel',
+        'therewasanattempt', 'unexpected'
+    ]
     RSS_FEEDS = [
         'https://www.polygon.com/rss/index.xml',
         'https://feeds.ign.com/ign/all',
         'https://kotaku.com/rss',
         'https://www.espn.com/espn/rss/news',  # confirmed official ESPN feed
+        # Golf Digest's own RSS FAQ page names this as their all-content
+        # feed - could not live-verify from this sandbox (golfdigest.com is
+        # blocked by this session's network egress policy, same as
+        # espn.com above), so treat as sourced-but-unverified until a real
+        # run confirms it resolves.
+        'http://www.golfdigest.com/services/rss/feeds/gd_everything.xml',
         # RockstarIntel: no publicly discoverable/verifiable RSS feed URL
         # found - not adding a guessed URL here. If you have the real feed
         # URL, add it to this list.
@@ -374,8 +388,10 @@ def generate_daily_trend_intelligence(channel_memory_recent_topics: List[str] = 
     Generate daily 7am trend intelligence brief
 
     Fetches real trends from:
-    - Reddit (r/GTA6, r/grandtheftauto, r/GrandTheftAutoVI, r/gaming, r/sports)
-    - RSS feeds (Polygon, IGN, Kotaku, ESPN)
+    - Reddit (r/GTA6, r/grandtheftauto, r/GrandTheftAutoVI, r/gaming, r/sports,
+      r/golf, r/PublicFreakout, r/funny, r/nextfuckinglevel,
+      r/therewasanattempt, r/unexpected)
+    - RSS feeds (Polygon, IGN, Kotaku, ESPN, Golf Digest)
     - Google Trends rising queries (unofficial, best-effort)
     - Fallback mock trends only if ALL of the above are unavailable
 

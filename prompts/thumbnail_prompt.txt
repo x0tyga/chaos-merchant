@@ -1,0 +1,18 @@
+# Thumbnail generation guidance
+# Read by agents/thumbnail.py's ThumbnailBriefGenerator and folded into
+# its brief-generation prompt as additional style guidance. Also
+# auto-appended to by agents/thumbnail_research.py's weekly trending-
+# thumbnail research (new sections get added below with a date header) -
+# this seed content establishes the channel's baseline brand direction.
+
+- Chaos Merchant covers chaotic, high-energy viral moments across ANY
+  topic - gaming, golf, sports, internet culture, unexpected/unhinged
+  moments - not just gaming. GTA6 is the current primary focus given its
+  release timing, but match the thumbnail's visual style to what this
+  specific clip is actually about (gaming aesthetic for gaming clips,
+  sports/golf visual language for sports/golf clips, etc.)
+- Prioritize a visible reaction, moment of impact, or "wait, what?" visual
+  over generic stock-photo-style compositions
+- Bold, high-contrast text large enough to read at thumbnail size on mobile
+- Consistent brand energy: bright, punchy, slightly unhinged - never calm
+  or understated, regardless of the underlying topic

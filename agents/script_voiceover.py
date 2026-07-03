@@ -1,6 +1,7 @@
 """
 Script + Voiceover Agent - Script generation and voice synthesis
-Generates gaming-focused scripts and produces voiceover audio
+Generates scripts for chaotic, high-energy viral moments across any topic
+(gaming, golf, sports, internet culture) and produces voiceover audio
 Primary: Kokoro TTS (free, local CPU)
 """
 
@@ -128,6 +129,11 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
         prompt = f"""Generate a YouTube Shorts voiceover script for ONE specific clip
 taken from a longer source video. Write about what's happening in THIS
 clip specifically, not the source video as a whole.
+
+This channel covers chaotic, high-energy viral moments across ANY topic -
+gaming, golf, sports, internet culture, unexpected/unhinged moments - not
+just gaming. GTA6 is the current primary focus given its release timing,
+but write for whatever this specific clip is actually about.
 
 Clip data:
 - Clip #{clip_index + 1}

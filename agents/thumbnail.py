@@ -1,6 +1,7 @@
 """
 Thumbnail Generation Agent - Creates YouTube Shorts thumbnails via Canva MCP
-Generates eye-catching, gaming-focused thumbnails that drive clicks
+Generates eye-catching, high-energy thumbnails for chaotic viral moments
+across any topic (gaming, golf, sports, internet culture) that drive clicks
 """
 
 import json
@@ -57,7 +58,7 @@ class ThumbnailBriefGenerator:
         logger.info("📸 Generating thumbnail brief...")
 
         engagement_score = clip_data.get('engagement_score', 0.5)
-        title = seo_data.get('best_title', 'Gaming Moment')
+        title = seo_data.get('best_title', 'Chaotic Moment')
         keywords = seo_data.get('metadata', {}).get('keywords', [])
         research_guidance = _load_thumbnail_prompt_guidance()
         research_section = (
@@ -65,7 +66,12 @@ class ThumbnailBriefGenerator:
             if research_guidance else ""
         )
 
-        prompt = f"""Generate a YouTube Shorts thumbnail brief for a gaming video.
+        prompt = f"""Generate a YouTube Shorts thumbnail brief for a chaotic, high-energy
+viral moment. This channel covers chaos across ANY topic - gaming, golf,
+sports, internet culture, unexpected/unhinged moments - not just gaming.
+GTA6 is the current primary focus given its release timing, but this
+specific clip may be about anything; match the visual style to what the
+title/keywords/script actually describe.
 
 Video Title: {title}
 Keywords: {', '.join(keywords[:3])}
@@ -78,12 +84,12 @@ Create a JSON response with:
 3. "fallback": Brief text-only description if Canva generation fails
 
 Requirements:
-- High contrast, eye-catching colors (gaming audience)
-- Large readable text (gaming title/hook)
+- High contrast, eye-catching colors
+- Large readable text (the title/hook)
 - Bright colors: neon, yellow, red, cyan preferred
-- Gaming aesthetic: bold fonts, action-oriented
+- Bold fonts, action-oriented composition matching this clip's actual content
 - Must grab attention in YouTube thumbnail grid
-- Include emojis or gaming visual elements in description
+- Include emojis or visual elements appropriate to the clip's actual topic
 
 Return ONLY valid JSON, no markdown."""
 
@@ -107,8 +113,8 @@ Return ONLY valid JSON, no markdown."""
                     raise ValueError("No JSON found")
             except (json.JSONDecodeError, ValueError):
                 brief_data = {
-                    'brief': 'Gaming moment with high energy and excitement',
-                    'canva_prompt': f'YouTube thumbnail for "{title}" - bold neon colors, large text, gaming aesthetic, high contrast, action-focused, use bright yellow/cyan/red colors',
+                    'brief': 'High energy chaotic moment with bold visual impact',
+                    'canva_prompt': f'YouTube thumbnail for "{title}" - bold neon colors, large text, high-energy aesthetic, high contrast, action-focused, use bright yellow/cyan/red colors',
                     'fallback': title
                 }
 
@@ -125,8 +131,8 @@ Return ONLY valid JSON, no markdown."""
             logger.error(f"❌ Brief generation failed: {e}")
             return {
                 'status': 'error',
-                'brief': 'Gaming thumbnail',
-                'canva_prompt': f'YouTube gaming thumbnail for "{title}" - high contrast, bold colors, text overlay',
+                'brief': 'High-energy chaotic moment thumbnail',
+                'canva_prompt': f'YouTube thumbnail for "{title}" - high contrast, bold colors, text overlay',
                 'fallback_text': title,
                 'title': title,
                 'error': str(e)
@@ -161,7 +167,7 @@ class CanvaThumbnailGenerator:
                 result = canva_generate_design(
                     query=canva_prompt,
                     design_type='youtube_thumbnail',
-                    user_intent='Generate YouTube Shorts thumbnail for gaming video'
+                    user_intent='Generate YouTube Shorts thumbnail for a chaotic viral moment (gaming, golf, sports, or internet culture)'
                 )
 
                 if result and 'design_url' in result:
@@ -238,7 +244,7 @@ class ThumbnailGenerator:
                 'status': 'error',
                 'thumbnail_type': 'error',
                 'error': str(e),
-                'fallback_text': seo_data.get('best_title', 'Gaming Moment')
+                'fallback_text': seo_data.get('best_title', 'Chaotic Moment')
             }
 
     def generate_all_thumbnails(self, clip_manifest: Dict, seo_manifest: Dict,

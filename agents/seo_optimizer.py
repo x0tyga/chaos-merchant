@@ -55,8 +55,15 @@ Generate a JSON object with:
 - keywords: list of 10 search keywords
 - tags: list of 5-8 video tags
 
+This channel covers chaotic, high-energy viral moments across ANY topic -
+gaming, golf, sports, internet culture, unexpected/unhinged moments -
+not just gaming. GTA6 is the current primary focus given its release
+timing, but match the vernacular and hashtags to whatever this specific
+clip's content actually is.
+
 Focus on:
-- Gaming/internet culture vernacular
+- Vernacular that matches the clip's actual topic (gaming slang for
+  gaming content, sports/golf terminology for sports content, etc.)
 - CTR optimization (curiosity, urgency)
 - Trending keyword integration
 - Hook-first messaging
@@ -104,25 +111,23 @@ Output ONLY valid JSON."""
         """Generate fallback metadata if API fails"""
         return {
             'titles': [
-                'INSANE GAMING MOMENT',
+                'INSANE VIRAL MOMENT',
                 'YOU WON\'T BELIEVE THIS',
                 'WAIT FOR IT...',
-                'THIS GLITCH IS CRAZY',
-                'MUST WATCH GAMING'
+                'THIS MOMENT IS CRAZY',
+                'MUST WATCH CHAOS'
             ],
-            'description': 'Check out this incredible gaming moment! Subscribe for more crazy clips.',
+            'description': 'Check out this incredible chaotic moment! Subscribe for more crazy clips.',
             'hashtags': [
-                '#Gaming', '#Gaming Clips', '#Viral', '#Gaming Glitch',
-                '#Shorts', '#YouTube', '#Twitch', '#Gameplay',
-                '#Funny Gaming', '#Gaming Moments'
+                '#Viral', '#Chaos', '#Shorts', '#YouTube',
+                '#CrazyMoment', '#UnbelievableMoment'
             ],
             'keywords': [
-                'gaming', 'gaming clips', 'viral gaming', 'funny gaming',
-                'gaming moments', 'gaming glitch', 'gaming fail',
-                'gaming highlights', 'gaming shorts'
+                'viral moment', 'chaotic moment', 'crazy clip',
+                'unbelievable moment', 'viral shorts', 'must watch'
             ],
             'tags': [
-                'Gaming', 'Viral', 'Funny', 'Glitch', 'Moments'
+                'Viral', 'Chaos', 'Funny', 'Crazy', 'Moments'
             ]
         }
 
@@ -139,7 +144,7 @@ Output ONLY valid JSON."""
         """
         titles = metadata.get('titles', [])
         if not titles:
-            return "Amazing Gaming Moment"
+            return "Amazing Chaotic Moment"
         
         # Prefer titles that are 40-55 characters (YouTube sweet spot)
         optimal_titles = [t for t in titles if 40 <= len(t) <= 55]

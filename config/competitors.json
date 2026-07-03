@@ -1,0 +1,6 @@
+{
+  "_note": "Empty by default - add real channels with: python -m agents.competitor_monitor add @SomeChannel (or via the dashboard's Trends page). This list should eventually cover more than just gaming channels: viral-moment/clip channels, sports highlight channels, and golf content channels too, matching Chaos Merchant's actual scope (chaos across gaming, golf, sports, and internet culture, not a gaming-only channel).",
+  "competitors": [],
+  "check_interval_hours": 3,
+  "alert_threshold_views_6h": 10000
+}
