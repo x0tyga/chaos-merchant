@@ -145,7 +145,9 @@ class BatchSummaryGenerator:
         for i, path in enumerate(video_paths):
             if Path(path).exists():
                 try:
-                    from moviepy.editor import VideoFileClip
+                    # moviepy 2.x removed the moviepy.editor namespace - same
+                    # fix already applied to video_production.py/quality_control.py
+                    from moviepy import VideoFileClip
                     clip = VideoFileClip(path)
                     duration = clip.duration
                     clip.close()
@@ -442,7 +444,8 @@ class OutputPackager:
         video_manifest: Dict,
         thumbnail_manifest: Dict,
         qc_result: Dict,
-        video_base_name: str = ''
+        video_base_name: str = '',
+        batch_id: str = None
     ) -> Dict:
         """
         Create complete output package:
@@ -453,6 +456,12 @@ class OutputPackager:
         - All manifests and metadata
         - Validation report
 
+        Args:
+            batch_id: externally-supplied batch identifier (e.g. from
+                Pipeline, so hook library logging and this batch folder
+                share the same ID). Falls back to generating one here if
+                not provided, for standalone/backward-compat use.
+
         Returns: packaging result with batch path
         """
 
@@ -461,7 +470,7 @@ class OutputPackager:
         logger.info("=" * 70)
 
         # Create timestamped batch folder
-        batch_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        batch_timestamp = batch_id or datetime.now().strftime('%Y%m%d_%H%M%S')
         batch_folder = self.output_dir / f"batch_{batch_timestamp}"
         batch_folder.mkdir(parents=True, exist_ok=True)
 
@@ -564,27 +573,47 @@ Steps:
         # ============================================================
         logger.info("\n📝 Creating upload metadata (from real SEO results)...")
 
-        seo_meta = seo_manifest.get('metadata', {}) or {}
-        candidate_titles = seo_meta.get('titles', []) or []
-        best_title = seo_manifest.get('best_title', '')
-        description = seo_meta.get('description', '')
-        hashtags = seo_meta.get('hashtags', []) or []
-        tags = seo_meta.get('tags', []) or []
-        keywords = seo_meta.get('keywords', []) or []
+        # Fallback (shared) fields, used only when per-clip SEO data isn't
+        # available for a given short - e.g. that clip's SEO generation
+        # failed, or this manifest predates the per-clip SEO pipeline.
+        fallback_meta = seo_manifest.get('metadata', {}) or {}
+        fallback_titles = fallback_meta.get('titles', []) or []
+        fallback_best_title = seo_manifest.get('best_title', '')
 
-        if not candidate_titles and not best_title:
-            logger.warning("  ⚠ No SEO titles found in seo_manifest — upload metadata will have empty titles, verify Step 5 ran successfully")
+        # video_paths is a FILTERED list (successes only) - positional index
+        # i no longer reliably equals short_number once any short fails.
+        # short_results (added alongside per-clip SEO) carries the real
+        # short_number for each produced video, so metadata is matched to
+        # the clip it actually came from. Fall back to positional indexing
+        # (the old behavior) if short_results isn't present.
+        short_results = video_manifest.get('short_results', [])
+        per_clip_seo = seo_manifest.get('per_clip', [])
+
+        if not fallback_titles and not fallback_best_title and not per_clip_seo:
+            logger.warning("  ⚠ No SEO data found in seo_manifest — upload metadata will have empty titles, verify Step 3 ran successfully")
 
         for i in range(len(video_paths)):
-            # NOTE: The pipeline currently generates one script + one SEO pass per
-            # source video, not per individual clip, so all 7 shorts share the same
-            # description/hashtags/tags/keywords. We distribute the SEO agent's 5
-            # candidate titles across the 7 shorts (cycling) so titles aren't
-            # identical, but this is real Claude-generated data, not per-clip metadata.
-            if candidate_titles:
-                title = candidate_titles[i % len(candidate_titles)]
+            short_number = short_results[i]['short_number'] if i < len(short_results) else i
+            clip_seo = per_clip_seo[short_number] if short_number < len(per_clip_seo) and per_clip_seo[short_number].get('status') == 'success' else None
+
+            if clip_seo:
+                # Real per-clip data: this short's OWN title/description/
+                # hashtags, not a shared set reused across all 7.
+                clip_meta = clip_seo.get('metadata', {}) or {}
+                title = clip_seo.get('best_title') or (clip_meta.get('titles') or [None])[0] or f"Untitled Short {i + 1}"
+                description = clip_meta.get('description', '')
+                hashtags = clip_meta.get('hashtags', []) or []
+                tags = clip_meta.get('tags', []) or []
+                keywords = clip_meta.get('keywords', []) or []
             else:
-                title = best_title or f"Untitled Short {i + 1}"
+                # Fallback: this clip's own SEO wasn't available, reuse the
+                # shared/first-successful data cycling titles so they're at
+                # least not identical.
+                title = fallback_titles[i % len(fallback_titles)] if fallback_titles else (fallback_best_title or f"Untitled Short {i + 1}")
+                description = fallback_meta.get('description', '')
+                hashtags = fallback_meta.get('hashtags', []) or []
+                tags = fallback_meta.get('tags', []) or []
+                keywords = fallback_meta.get('keywords', []) or []
 
             metadata = {
                 "short_index": i + 1,
@@ -746,7 +775,8 @@ def package_outputs(
     thumbnail_manifest: Dict,
     qc_result: Dict,
     output_dir: str = './output',
-    video_base_name: str = ''
+    video_base_name: str = '',
+    batch_id: str = None
 ) -> Dict:
     """
     Main entry point: Package all outputs into clean, organized batch folder
@@ -774,7 +804,7 @@ def package_outputs(
         packager = OutputPackager(output_dir)
         result = packager.create_batch_folder(
             clip_manifest, seo_manifest, video_manifest,
-            thumbnail_manifest, qc_result, video_base_name
+            thumbnail_manifest, qc_result, video_base_name, batch_id
         )
 
         return {

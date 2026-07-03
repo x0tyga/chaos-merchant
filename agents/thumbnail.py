@@ -216,13 +216,16 @@ class ThumbnailGenerator:
             }
 
     def generate_all_thumbnails(self, clip_manifest: Dict, seo_manifest: Dict,
-                                script: str) -> Dict:
-        """Generate thumbnails for all 7 shorts"""
+                                voiceover_results: list) -> Dict:
+        """Generate thumbnails for all 7 shorts, each using that specific
+        clip's own SEO data and script (seo_manifest['per_clip'][i] /
+        voiceover_results[i]) instead of one shared set reused for all 7."""
         logger.info("🎬 Starting thumbnail generation for all shorts...")
 
         results = []
         top_clip_indices = clip_manifest.get('top_clip_indices', [])
         clips = clip_manifest.get('clips', [])
+        per_clip_seo = (seo_manifest or {}).get('per_clip', [])
 
         if not top_clip_indices or not clips:
             logger.error("❌ No clips found")
@@ -235,7 +238,13 @@ class ThumbnailGenerator:
         for i, clip_idx in enumerate(top_clip_indices[:7]):
             if clip_idx < len(clips):
                 clip_data = clips[clip_idx]
-                seo_data = seo_manifest or {}
+                # Fall back to the shared top-level seo_manifest fields if
+                # per_clip data isn't available for this index (e.g. that
+                # clip's SEO generation failed) - still real data, just not
+                # this specific clip's own.
+                seo_data = per_clip_seo[i] if i < len(per_clip_seo) and per_clip_seo[i].get('status') == 'success' else (seo_manifest or {})
+                voiceover_for_clip = voiceover_results[i] if i < len(voiceover_results) else {}
+                script = voiceover_for_clip.get('script', {}).get('full_script', '')
 
                 result = self.generate_thumbnail(clip_data, seo_data, script, i)
                 results.append(result)
@@ -259,15 +268,20 @@ class ThumbnailGenerator:
         }
 
 
-def generate_thumbnails(clip_manifest: Dict, seo_manifest: Dict, voiceover_result: Dict,
+def generate_thumbnails(clip_manifest: Dict, seo_manifest: Dict, voiceover_results: list,
                        output_dir: str = './output') -> Dict:
     """
     Main entry point: Generate thumbnails for all shorts
-    
+
     Phase 2 approach:
     - If Canva MCP available in session: Generate thumbnail images directly
     - If Canva MCP unavailable: Return detailed brief + Canva prompt for manual creation
-    
+
+    Args:
+        voiceover_results: list of per-clip voiceover results (one per
+            short, same order as clip_manifest['top_clip_indices']), each
+            shaped like generate_voiceover_for_clip()'s return value
+
     Returns fallback strategy so users can create on home machine if needed
     """
     logger.info("=" * 60)
@@ -275,10 +289,8 @@ def generate_thumbnails(clip_manifest: Dict, seo_manifest: Dict, voiceover_resul
     logger.info("=" * 60)
 
     try:
-        script = voiceover_result.get('script', {}).get('full_script', '')
-
         generator = ThumbnailGenerator(output_dir)
-        result = generator.generate_all_thumbnails(clip_manifest, seo_manifest, script)
+        result = generator.generate_all_thumbnails(clip_manifest, seo_manifest, voiceover_results)
 
         logger.info("\n" + "=" * 60)
         logger.info(f"THUMBNAIL GENERATION COMPLETE")

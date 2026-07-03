@@ -23,23 +23,61 @@ class ScriptGenerator:
     def __init__(self):
         self.client = Anthropic()
 
+    def _call_and_parse(self, prompt: str) -> dict:
+        """
+        Shared Claude call + JSON-extraction logic for both generate_script()
+        (whole-video, legacy) and generate_script_for_clip() (per-clip).
+        """
+        response = self.client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+        response_text = response.content[0].text
+
+        try:
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}') + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                json_str = response_text[start_idx:end_idx]
+                script_data = json.loads(json_str)
+            else:
+                raise ValueError("No JSON found")
+        except (json.JSONDecodeError, ValueError):
+            # Fallback: create structured script from response
+            script_data = {
+                'hook': 'Check out this crazy moment!',
+                'main_content': response_text[:200],
+                'cta': 'Drop a like and subscribe for more!',
+                'full_script': response_text,
+                'reading_time_seconds': 40
+            }
+
+        return script_data
+
     def generate_script(self, clip_data, trending_topics=None, channel_history=None):
         """
-        Generate voiceover script from clip data
-        
+        Generate ONE voiceover script for the whole video (legacy/whole-video
+        mode). For per-clip scripts (each short gets its own unique hook and
+        script matching what's actually on screen), use
+        generate_script_for_clip() instead - this is what the pipeline uses.
+
         Args:
             clip_data: Clip intelligence manifest
             trending_topics: List of trending topics
             channel_history: Previous video summaries
-        
+
         Returns:
             dict: Generated script with metadata
         """
         logger.info("📝 Generating script...")
-        
+
         # Build context
         top_clips = clip_data.get('top_clips', [])[:3]  # Use top 3 for context
-        
+
         prompt = f"""Generate a YouTube Shorts voiceover script.
 
 Video data:
@@ -53,46 +91,65 @@ Channel history: {json.dumps(channel_history or [], indent=2)}
 Generate a JSON object with: hook, main_content, cta, full_script, reading_time_seconds"""
 
         try:
-            response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=500,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            # Parse response
-            response_text = response.content[0].text
-            
-            # Try to extract JSON
-            try:
-                # Find JSON in response
-                start_idx = response_text.find('{')
-                end_idx = response_text.rfind('}') + 1
-                if start_idx >= 0 and end_idx > start_idx:
-                    json_str = response_text[start_idx:end_idx]
-                    script_data = json.loads(json_str)
-                else:
-                    raise ValueError("No JSON found")
-            except (json.JSONDecodeError, ValueError):
-                # Fallback: create structured script from response
-                script_data = {
-                    'hook': 'Check out this crazy moment!',
-                    'main_content': response_text[:200],
-                    'cta': 'Drop a like and subscribe for more!',
-                    'full_script': response_text,
-                    'reading_time_seconds': 40
-                }
-            
+            script_data = self._call_and_parse(prompt)
             logger.info(f"✓ Script generated ({script_data.get('reading_time_seconds', 0)}s)")
             return {
                 'status': 'success',
                 'script': script_data,
                 'model': 'claude-haiku-4-5-20251001'
             }
-            
+
         except Exception as e:
             logger.error(f"❌ Script generation failed: {e}")
+            raise
+
+    def generate_script_for_clip(self, clip_data, clip_index, trending_topics=None, channel_history=None):
+        """
+        Generate a voiceover script scoped to ONE specific clip, not the
+        whole source video - each of the 7 shorts gets its own hook/script
+        matching that clip's actual content instead of one script shared
+        (and mismatched) across all of them.
+
+        Args:
+            clip_data: A single clip dict from clip_manifest['clips']
+                (start_time, end_time, duration, engagement_score, etc.)
+            clip_index: This clip's position among the selected shorts (0-based)
+            trending_topics: List of trending topics
+            channel_history: Previous video summaries
+
+        Returns:
+            dict: Generated script with metadata
+        """
+        logger.info(f"📝 Generating script for clip {clip_index + 1}...")
+
+        prompt = f"""Generate a YouTube Shorts voiceover script for ONE specific clip
+taken from a longer source video. Write about what's happening in THIS
+clip specifically, not the source video as a whole.
+
+Clip data:
+- Clip #{clip_index + 1}
+- Duration: {clip_data.get('duration', 0):.1f} seconds
+- Engagement score: {round(clip_data.get('engagement_score', 0), 2)} (0-1 scale)
+- Scene change confidence: {round(clip_data.get('scene_change_confidence', 0), 2)}
+- Audio energy: {round(clip_data.get('audio_features', {}).get('energy', 0), 2)}
+
+Trending topics: {json.dumps(trending_topics or [], indent=2)}
+Channel history: {json.dumps(channel_history or [], indent=2)}
+
+Generate a JSON object with: hook, main_content, cta, full_script, reading_time_seconds"""
+
+        try:
+            script_data = self._call_and_parse(prompt)
+            logger.info(f"✓ Script generated for clip {clip_index + 1} ({script_data.get('reading_time_seconds', 0)}s)")
+            return {
+                'status': 'success',
+                'clip_index': clip_index,
+                'script': script_data,
+                'model': 'claude-haiku-4-5-20251001'
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Script generation failed for clip {clip_index + 1}: {e}")
             raise
 
 
@@ -365,9 +422,46 @@ class VoiceoverComparison:
         return results
 
 
+def _synthesize_voiceover(full_text: str, output_path: str = None, label: str = '') -> dict:
+    """
+    Shared Kokoro-then-ElevenLabs fallback logic used by both
+    generate_voiceover() (whole-video) and generate_voiceover_for_clip()
+    (per-clip). Raises RuntimeError if neither engine is available -
+    mirrors the exact check main.py's pre-flight verify_environment() uses.
+    """
+    voiceover_result = None
+    kokoro = KokoroTTS()
+
+    if kokoro.available:
+        try:
+            logger.info(f"Using Kokoro TTS (free, local voice synthesis){label}...")
+            voiceover_result = kokoro.generate(full_text, output_path=output_path)
+        except Exception as e:
+            logger.warning(f"⚠️  Kokoro failed{label}: {e}")
+    else:
+        logger.warning(f"⚠️  Kokoro TTS not available{label}")
+
+    if voiceover_result is None:
+        elevenlabs = ElevenLabsTTS()
+        if elevenlabs.available:
+            logger.info(f"Falling back to ElevenLabs premium voice synthesis{label}...")
+            voiceover_result = elevenlabs.generate(full_text, output_path=output_path)
+        else:
+            raise RuntimeError(
+                f"❌ No voiceover engine available{label}\n"
+                "Install Kokoro with: pip install kokoro-onnx (and download the model files, see KokoroTTS docstring)\n"
+                "Or configure ElevenLabs: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env"
+            )
+
+    return voiceover_result
+
+
 def generate_voiceover(clip_data, trending_topics=None, channel_history=None):
     """
-    Main function to generate script and voiceover.
+    Generate ONE script + voiceover for the whole video (legacy/whole-video
+    mode). For per-clip voiceovers (each short gets its own script and
+    audio matching what's actually on screen), use
+    generate_voiceover_for_clip() instead - this is what the pipeline uses.
     Primary: Kokoro TTS (free, local). Fallback: ElevenLabs (if configured).
 
     Args:
@@ -380,7 +474,6 @@ def generate_voiceover(clip_data, trending_topics=None, channel_history=None):
     """
     logger.info("🎬 Starting script + voiceover generation...")
 
-    # Generate script
     generator = ScriptGenerator()
     script_result = generator.generate_script(clip_data, trending_topics, channel_history)
 
@@ -389,35 +482,49 @@ def generate_voiceover(clip_data, trending_topics=None, channel_history=None):
 
     script = script_result['script']
     full_text = script.get('full_script', '')
-
-    # Primary: Kokoro TTS (free, local)
-    voiceover_result = None
-    kokoro = KokoroTTS()
-
-    if kokoro.available:
-        try:
-            logger.info("Using Kokoro TTS (free, local voice synthesis)...")
-            voiceover_result = kokoro.generate(full_text)
-        except Exception as e:
-            logger.warning(f"⚠️  Kokoro failed: {e}")
-    else:
-        logger.warning("⚠️  Kokoro TTS not available")
-
-    # Fallback: ElevenLabs (only if Kokoro unavailable/failed and ElevenLabs configured)
-    if voiceover_result is None:
-        elevenlabs = ElevenLabsTTS()
-        if elevenlabs.available:
-            logger.info("Falling back to ElevenLabs premium voice synthesis...")
-            voiceover_result = elevenlabs.generate(full_text)
-        else:
-            raise RuntimeError(
-                "❌ No voiceover engine available\n"
-                "Install Kokoro with: pip install kokoro-onnx (and download the model files, see KokoroTTS docstring)\n"
-                "Or configure ElevenLabs: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env"
-            )
+    voiceover_result = _synthesize_voiceover(full_text)
 
     return {
         'status': 'success',
+        'script': script,
+        'voiceover': voiceover_result,
+        'timestamp': datetime.now().isoformat()
+    }
+
+
+def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None, channel_history=None):
+    """
+    Generate a script + voiceover scoped to ONE specific clip. Each of the
+    7 shorts calls this independently, producing its own hook/script and
+    its own voice recording - matching what's actually on screen for that
+    clip, instead of all 7 shorts sharing one script/audio file recorded
+    about the source video as a whole.
+
+    Args:
+        clip_data: A single clip dict from clip_manifest['clips']
+        clip_index: This clip's position among the selected shorts (0-based)
+        trending_topics: Trending topics for context
+        channel_history: Previous video data
+
+    Returns:
+        dict: Script + voiceover results for this one clip
+    """
+    logger.info(f"🎬 Starting script + voiceover generation for clip {clip_index + 1}...")
+
+    generator = ScriptGenerator()
+    script_result = generator.generate_script_for_clip(clip_data, clip_index, trending_topics, channel_history)
+
+    if script_result['status'] != 'success':
+        raise RuntimeError(f"Script generation failed for clip {clip_index + 1}")
+
+    script = script_result['script']
+    full_text = script.get('full_script', '')
+    output_path = f"/tmp/voiceover_clip{clip_index}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+    voiceover_result = _synthesize_voiceover(full_text, output_path=output_path, label=f" (clip {clip_index + 1})")
+
+    return {
+        'status': 'success',
+        'clip_index': clip_index,
         'script': script,
         'voiceover': voiceover_result,
         'timestamp': datetime.now().isoformat()

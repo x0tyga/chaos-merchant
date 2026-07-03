@@ -71,6 +71,9 @@ class Pipeline:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint = PipelineCheckpoint(video_path, checkpoint_dir=str(self.data_dir / 'checkpoints'))
+        # Generated once per run, shared by hook library logging and the
+        # Step 7 batch folder name, so both refer to the same batch.
+        self.batch_id = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.processing_log = {
             'video_path': str(video_path),
             'started_at': datetime.now().isoformat(),
@@ -121,6 +124,53 @@ class Pipeline:
             logger.warning(f"⚠ Failed to load trend intelligence brief: {e}")
             return []
 
+    def _log_hook_usage(self, clip_manifest, voiceover_results, production_result):
+        """
+        Log every hook that actually made it into a produced short to the
+        Hook Library - placeholder logging so the future Analytics agent
+        has real usage data (hook text, style, batch, pre-publish viral
+        score) to work with once real YouTube performance numbers exist.
+        Only logs hooks for shorts CONFIRMED produced
+        (production_result['short_results']), not ones that were scripted
+        but then failed during video production - a hook that never
+        shipped shouldn't be logged as used.
+        """
+        try:
+            from core.memory import HookLibrary
+            hook_library = HookLibrary(str(self.data_dir / 'chaos_merchant.db'))
+        except Exception as e:
+            logger.warning(f"⚠ Hook library unavailable, skipping hook usage logging: {e}")
+            return
+
+        clips = clip_manifest.get('clips', [])
+        logged = 0
+        for short_result in production_result.get('short_results', []):
+            short_number = short_result.get('short_number')
+            clip_idx = short_result.get('clip_idx')
+            if short_number is None or short_number >= len(voiceover_results):
+                continue
+
+            clip_voiceover = voiceover_results[short_number]
+            if clip_voiceover.get('status') != 'success':
+                continue
+
+            hook_text = clip_voiceover.get('script', {}).get('hook', '')
+            if not hook_text:
+                continue
+
+            clip_data = clips[clip_idx] if clip_idx is not None and clip_idx < len(clips) else {}
+            viral_score = clip_data.get('viral_score', 0.0)
+
+            hook_id = hook_library.get_or_create_hook(hook_text, style='opening')
+            if hook_id is not None:
+                hook_library.log_hook_production(
+                    hook_id, batch_id=self.batch_id, viral_score=viral_score,
+                    short_id=f"{self.batch_id}_short{short_number}"
+                )
+                logged += 1
+
+        logger.info(f"✓ Logged {logged} hook(s) to Hook Library for batch {self.batch_id}")
+
     def _load_channel_history(self):
         """
         Load real recently-published topics from Channel Memory (SQLite) to avoid
@@ -168,57 +218,102 @@ class Pipeline:
             self.checkpoint.save(PipelineStep.CLIP_INTELLIGENCE, {'manifest_path': str(manifest_path)})
             self.log_step(PipelineStep.CLIP_INTELLIGENCE, 'complete', {'clips_found': len(clip_manifest['clips']), 'top_clips': len(clip_manifest['top_clip_indices'])})
             
-            # Step 2: Script + Voiceover
-            logger.info("Step 2/7: Script Generation + Voiceover")
+            # Step 2: Script + Voiceover (per-clip)
+            # Each of the 7 shorts gets its OWN script and voice recording
+            # matching that specific clip's content, instead of one shared
+            # script/audio file muxed onto all 7 regardless of what's
+            # actually on screen for each one.
+            logger.info("Step 2/7: Script Generation + Voiceover (per-clip)")
             self.log_step(PipelineStep.SCRIPT_VOICEOVER, 'in_progress')
 
-            from agents.script_voiceover import generate_voiceover
+            from agents.script_voiceover import generate_voiceover_for_clip
 
             trending_topics = self._load_trending_topics()
             channel_history = self._load_channel_history()
 
-            voiceover_result = generate_voiceover(
-                clip_manifest,
-                trending_topics=trending_topics,
-                channel_history=channel_history
-            )
-            self.step_outputs['script_voiceover'] = voiceover_result
-            
-            # Save voiceover metadata
+            top_clip_indices = clip_manifest.get('top_clip_indices', [])
+            clips = clip_manifest.get('clips', [])
+
+            voiceover_results = []
+            for i, clip_idx in enumerate(top_clip_indices):
+                clip_data = clips[clip_idx] if clip_idx < len(clips) else {}
+                try:
+                    vr = generate_voiceover_for_clip(
+                        clip_data, i,
+                        trending_topics=trending_topics,
+                        channel_history=channel_history
+                    )
+                    voiceover_results.append(vr)
+                except Exception as e:
+                    logger.error(f"❌ Voiceover generation failed for clip {i + 1}/{len(top_clip_indices)}: {e}")
+                    voiceover_results.append({'status': 'error', 'clip_index': i, 'error': str(e)})
+
+            self.step_outputs['script_voiceover'] = voiceover_results
+
+            # Save voiceover metadata (now a list, one entry per clip)
             voiceover_path = self.output_dir / f"{self.video_path.stem}_voiceover_metadata.json"
             with open(voiceover_path, 'w') as f:
-                json.dump(voiceover_result, f, indent=2)
-            
+                json.dump(voiceover_results, f, indent=2)
+
+            voiceover_succeeded = len([v for v in voiceover_results if v.get('status') == 'success'])
             self.checkpoint.save(PipelineStep.SCRIPT_VOICEOVER, {'voiceover_path': str(voiceover_path)})
             self.log_step(PipelineStep.SCRIPT_VOICEOVER, 'complete', {
-                'engine': voiceover_result.get('voiceover', {}).get('engine'),
-                'audio_path': voiceover_result.get('voiceover', {}).get('audio_path')
+                'clips_processed': len(voiceover_results),
+                'succeeded': voiceover_succeeded
             })
-            
-            # Step 3: SEO Optimizer
-            logger.info("Step 3/7: SEO Optimization")
+
+            if voiceover_succeeded == 0:
+                raise Exception("Script + Voiceover generation failed for every clip - cannot produce any shorts")
+
+            # Step 3: SEO Optimizer (per-clip)
+            # Each short's keywords/description/hashtags are generated from
+            # its OWN clip content and script, not one shared set copied
+            # across all 7. optimize_seo() itself didn't need to change -
+            # it already accepted single-clip data; only this caller did.
+            logger.info("Step 3/7: SEO Optimization (per-clip)")
             self.log_step(PipelineStep.SEO_OPTIMIZER, 'in_progress')
-            
+
             from agents.seo_optimizer import optimize_seo
 
-            seo_result = optimize_seo(
-                clip_manifest,
-                voiceover_result,
-                trending_topics=trending_topics
-            )
+            seo_results = []
+            for i, clip_idx in enumerate(top_clip_indices):
+                clip_data = clips[clip_idx] if clip_idx < len(clips) else {}
+                clip_voiceover = voiceover_results[i] if i < len(voiceover_results) else {}
+                try:
+                    sr = optimize_seo(clip_data, clip_voiceover, trending_topics=trending_topics)
+                    seo_results.append(sr)
+                except Exception as e:
+                    logger.error(f"❌ SEO optimization failed for clip {i + 1}/{len(top_clip_indices)}: {e}")
+                    seo_results.append({'status': 'error', 'clip_index': i, 'error': str(e)})
+
+            # Backward-compatible top-level shape (best_title/metadata),
+            # taken from the first successful clip, for consumers that
+            # expect a single SEO result (e.g. QC's REQUIRED_FIELDS_SEO
+            # presence check). 'per_clip' is the real, authoritative
+            # per-short data that output_packaging/thumbnail generation use.
+            first_success = next((r for r in seo_results if r.get('status') == 'success'), {})
+            seo_result = {
+                'status': 'success' if first_success else 'error',
+                'best_title': first_success.get('best_title', ''),
+                'metadata': first_success.get('metadata', {}),
+                'per_clip': seo_results,
+                'timestamp': datetime.now().isoformat()
+            }
             self.step_outputs['seo_optimizer'] = seo_result
-            
+
             # Save SEO metadata
             seo_path = self.output_dir / f"{self.video_path.stem}_seo_metadata.json"
             with open(seo_path, 'w') as f:
                 json.dump(seo_result, f, indent=2)
-            
+
+            seo_succeeded = len([r for r in seo_results if r.get('status') == 'success'])
             self.checkpoint.save(PipelineStep.SEO_OPTIMIZER, {'seo_path': str(seo_path)})
             self.log_step(PipelineStep.SEO_OPTIMIZER, 'complete', {
-                'best_title': seo_result.get('best_title'),
-                'hashtags_count': len(seo_result.get('metadata', {}).get('hashtags', []))
+                'clips_processed': len(seo_results),
+                'succeeded': seo_succeeded,
+                'best_title': seo_result.get('best_title')
             })
-            
+
             # Step 4: Video Production
             logger.info("Step 4/7: Video Production")
             self.log_step(PipelineStep.VIDEO_PRODUCTION, 'in_progress')
@@ -228,7 +323,7 @@ class Pipeline:
             production_result = produce_shorts(
                 source_video_path=str(self.video_path),
                 clip_manifest=self.step_outputs['clip_intelligence'],
-                voiceover_result=self.step_outputs['script_voiceover'],
+                voiceover_results=self.step_outputs['script_voiceover'],
                 output_dir=str(self.output_dir),
                 temp_dir=str(self.output_dir / 'temp')
             )
@@ -247,7 +342,9 @@ class Pipeline:
                 'videos_produced': len(production_result.get('video_paths', [])),
                 'total_time': production_result.get('processing_times', {}).get('export_total', 0)
             })
-            
+
+            self._log_hook_usage(clip_manifest, self.step_outputs['script_voiceover'], production_result)
+
             # Step 5: Thumbnail Generation
             logger.info("Step 5/7: Thumbnail Generation")
             self.log_step(PipelineStep.THUMBNAIL, 'in_progress')
@@ -257,7 +354,7 @@ class Pipeline:
             thumbnail_result = generate_thumbnails(
                 clip_manifest=self.step_outputs['clip_intelligence'],
                 seo_manifest=self.step_outputs['seo_optimizer'],
-                voiceover_result=self.step_outputs['script_voiceover'],
+                voiceover_results=self.step_outputs['script_voiceover'],
                 output_dir=str(self.output_dir)
             )
             self.step_outputs['thumbnail'] = thumbnail_result
@@ -331,7 +428,8 @@ class Pipeline:
                 thumbnail_manifest=self.step_outputs['thumbnail'],
                 qc_result=self.step_outputs['quality_control'],
                 output_dir=str(self.output_dir),
-                video_base_name=self.video_path.stem
+                video_base_name=self.video_path.stem,
+                batch_id=self.batch_id
             )
             self.step_outputs['output_packaging'] = packaging_result
 

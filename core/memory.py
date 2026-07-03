@@ -87,10 +87,21 @@ class HookLibrary:
                     video_title TEXT,
                     ctr REAL,
                     retention_30s REAL,
+                    batch_id TEXT,
+                    viral_score REAL,
                     used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (hook_id) REFERENCES hooks(id)
                 )
             ''')
+
+            # CREATE TABLE IF NOT EXISTS is a no-op on tables that already
+            # exist, so batch_id/viral_score need an explicit migration for
+            # any pre-existing database created before these columns did.
+            for column, coltype in [('batch_id', 'TEXT'), ('viral_score', 'REAL')]:
+                try:
+                    cursor.execute(f'ALTER TABLE hook_usage_log ADD COLUMN {column} {coltype}')
+                except sqlite3.OperationalError:
+                    pass  # column already exists
 
             conn.commit()
             conn.close()
@@ -121,6 +132,68 @@ class HookLibrary:
             return False
         except Exception as e:
             logger.error(f"❌ Failed to add hook: {e}")
+            return False
+
+    def get_or_create_hook(self, text: str, style: str) -> Optional[int]:
+        """
+        Get the hook's ID if it already exists (hooks.text is UNIQUE), or
+        insert it as new and return the new ID either way. Unlike add_hook()
+        (which returns bool and discards the ID on a duplicate), this always
+        gives back a usable ID - needed by the pipeline to log usage without
+        tracking IDs across separate runs/batches.
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+
+            cursor.execute('SELECT id FROM hooks WHERE text = ?', (text,))
+            row = cursor.fetchone()
+            if row:
+                conn.close()
+                return row[0]
+
+            cursor.execute('''
+                INSERT INTO hooks (text, style, first_used, last_used, status)
+                VALUES (?, ?, ?, ?, 'new')
+            ''', (text, style, datetime.now().date(), datetime.now().date()))
+            conn.commit()
+            hook_id = cursor.lastrowid
+            conn.close()
+
+            logger.info(f"✓ Hook added [ID:{hook_id}] Style:{style} Status:new")
+            return hook_id
+        except Exception as e:
+            logger.error(f"❌ Failed to get_or_create hook: {e}")
+            return None
+
+    def log_hook_production(self, hook_id: int, batch_id: str, viral_score: float,
+                            short_id: str = None, title: str = None) -> bool:
+        """
+        Record that a hook was used in a produced batch, before any real
+        YouTube performance data exists yet. This is placeholder logging
+        only, feeding the future Analytics agent - it deliberately does NOT
+        touch ctr/retention_30s/status (those stay untouched until
+        record_usage() is later called with actual YouTube data). Calling
+        record_usage() here instead would pollute the hook's real CTR/
+        retention averages with fake zero-performance rows and could
+        prematurely mark a hook 'declining'.
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                INSERT INTO hook_usage_log (hook_id, short_id, video_title, batch_id, viral_score)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (hook_id, short_id, title, batch_id, viral_score))
+
+            conn.commit()
+            conn.close()
+
+            logger.info(f"✓ Hook production logged [ID:{hook_id}] Batch:{batch_id} ViralScore:{viral_score:.1f}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to log hook production: {e}")
             return False
 
     def _compute_status(self, usage_count: int, avg_ctr: float, avg_retention: float, current_status: str) -> str:

@@ -459,15 +459,21 @@ class VideoExporter:
 class VideoProducer:
     """Main orchestrator for video production - Phase 2 Complete"""
 
-    def __init__(self, source_video_path: str, clip_manifest: Dict, voiceover_result: Dict,
-                 output_dir: str, temp_dir: str = None, script: str = None, channel_name: str = None):
+    def __init__(self, source_video_path: str, clip_manifest: Dict, voiceover_results: List[Dict],
+                 output_dir: str, temp_dir: str = None, channel_name: str = None):
+        """
+        voiceover_results: list of per-clip voiceover results (one per
+        short, same order/index as clip_manifest['top_clip_indices']),
+        each shaped like generate_voiceover_for_clip()'s return value -
+        so each short gets its OWN script/audio instead of one shared
+        voiceover muxed onto all 7 clips regardless of content match.
+        """
         self.source_video_path = Path(source_video_path)
         self.clip_manifest = clip_manifest
-        self.voiceover_result = voiceover_result
+        self.voiceover_results = voiceover_results or []
         self.output_dir = Path(output_dir)
         self.temp_dir = Path(temp_dir or self.output_dir / 'temp')
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        self.script = script or voiceover_result.get('script', {}).get('full_script', '')
         self.channel_name = channel_name or os.getenv('CHANNEL_NAME', 'Chaos Merchant')
 
     def produce_all_shorts(self) -> Dict:
@@ -531,9 +537,22 @@ class VideoProducer:
         features_in_all_shorts = sorted(set.intersection(*per_short_feature_sets)) if per_short_feature_sets else []
         features_in_any_short = sorted(set.union(*per_short_feature_sets)) if per_short_feature_sets else []
 
+        # video_paths is a FILTERED list (successes only), so its position
+        # doesn't reliably equal short_number once any short fails - e.g. if
+        # short 2 fails, video_paths[2] is actually short 3's video. This
+        # matters now that each short has its own distinct per-clip SEO/
+        # script data: downstream consumers (output_packaging.py) need the
+        # real short_number to look up the RIGHT clip's metadata, not just
+        # positional order in this filtered list.
+        short_results = [
+            {'short_number': r.get('short_number'), 'clip_idx': r.get('clip_idx'), 'output_path': r.get('output_path')}
+            for r in results if r.get('status') == 'success'
+        ]
+
         return {
             'status': batch_status,
             'video_paths': video_paths,
+            'short_results': short_results,
             'timings': timings,
             'processing_times': {
                 'export_total': round(export_total, 2),
@@ -579,14 +598,25 @@ class VideoProducer:
             method = 'crop' if aspect == '16:9' else 'letterbox'
             reframed_clip = VerticalReframer.reframe(extracted_clip, method=method)
 
+            if short_number >= len(self.voiceover_results):
+                raise IndexError(f"No voiceover result available for short {short_number}")
+            clip_voiceover = self.voiceover_results[short_number]
+            if clip_voiceover.get('status') != 'success':
+                raise ValueError(
+                    f"Voiceover generation for short {short_number} did not succeed "
+                    f"(status: {clip_voiceover.get('status')}) - cannot produce this short "
+                    f"without its own audio"
+                )
+            clip_script = clip_voiceover.get('script', {}).get('full_script', '')
+
             logger.info(f"Step 3: Preparing audio (voiceover + music ducking)...")
-            audio_processor = AudioProcessor(self.voiceover_result['voiceover']['audio_path'])
+            audio_processor = AudioProcessor(clip_voiceover['voiceover']['audio_path'])
             voiceover_audio = audio_processor.load_voiceover()
             final_audio, ducking_applied = audio_processor.prepare_audio(reframed_clip, voiceover_audio)
             reframed_clip = reframed_clip.with_audio(final_audio)
 
             logger.info(f"Step 4: Adding burned-in captions...")
-            caption_sync = CaptionSynchronizer(self.script)
+            caption_sync = CaptionSynchronizer(clip_script)
             caption_timeline = caption_sync.generate_caption_timeline(voiceover_audio.duration)
             captioned_clip = caption_sync.render_captions(reframed_clip, caption_timeline)
             # render_captions/apply_color_grading/apply_branding each return the
@@ -673,26 +703,29 @@ class VideoProducer:
             }
 
 
-def produce_shorts(source_video_path: str, clip_manifest: Dict, voiceover_result: Dict,
-                  script_data: Dict = None, output_dir: str = './output',
-                  temp_dir: str = None) -> Dict:
+def produce_shorts(source_video_path: str, clip_manifest: Dict, voiceover_results: List[Dict],
+                  output_dir: str = './output', temp_dir: str = None) -> Dict:
     """
     Main entry point: Produce shorts with Phase 2 features
     - Burned-in captions synced to voiceover
     - Music ducking (background audio reduces during voiceover)
     - Color grading (contrast + saturation boost)
     - Channel branding watermark
+
+    Args:
+        voiceover_results: list of per-clip voiceover results (one per
+            short, same order as clip_manifest['top_clip_indices']), each
+            shaped like generate_voiceover_for_clip()'s return value
     """
     logger.info("=" * 60)
     logger.info("🎬 VIDEO PRODUCTION AGENT - PHASE 2 (FULL FEATURES)")
     logger.info("=" * 60)
 
     try:
-        script = script_data.get('script', {}).get('full_script', '') if script_data else voiceover_result.get('script', {}).get('full_script', '')
         channel_name = os.getenv('CHANNEL_NAME', 'Chaos Merchant')
 
-        producer = VideoProducer(source_video_path, clip_manifest, voiceover_result,
-                                output_dir, temp_dir, script, channel_name)
+        producer = VideoProducer(source_video_path, clip_manifest, voiceover_results,
+                                output_dir, temp_dir, channel_name)
         result = producer.produce_all_shorts()
 
         logger.info("\n" + "=" * 60)
