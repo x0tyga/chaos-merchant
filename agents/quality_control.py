@@ -14,7 +14,11 @@ import os
 from difflib import SequenceMatcher
 
 try:
-    from moviepy.editor import VideoFileClip
+    # moviepy 2.x removed the moviepy.editor namespace - see the same fix
+    # applied to agents/video_production.py. Only VideoFileClip's read-only
+    # properties (.duration, .w, .h, .audio, .fps) are used in this file,
+    # which are unchanged between v1 and v2, so this is a pure import fix.
+    from moviepy import VideoFileClip
     import numpy as np
 except ImportError:
     raise ImportError("moviepy and numpy required: pip install moviepy numpy")
@@ -31,8 +35,13 @@ class VideoValidator:
     EXPECTED_AUDIO_CODEC = 'aac'
     MIN_FILE_SIZE = 500000  # 500KB
     MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
-    MIN_DURATION = 15  # Pipeline standard (was 10)
-    MAX_DURATION = 45  # Pipeline standard (was 120)
+    # Read from the same env vars clip_intelligence.py uses for segment
+    # selection (MIN_CLIP_DURATION/MAX_CLIP_DURATION) instead of a separate
+    # hardcoded constant - previously these could silently disagree if
+    # either env var was overridden, causing QC to hard-fail videos that
+    # clip selection considered valid (or vice versa).
+    MIN_DURATION = int(os.getenv('MIN_CLIP_DURATION', 15))
+    MAX_DURATION = int(os.getenv('MAX_CLIP_DURATION', 45))
     AUDIO_SYNC_TOLERANCE = 0.3  # Stricter tolerance (was 1.0)
 
     @staticmethod
