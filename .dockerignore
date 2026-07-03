@@ -1,0 +1,17 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+.venv
+venv/
+data/
+input/*
+output/*
+logs/
+analytics/
+*.log
+.env
+.env.local
+.DS_Store
+tests/
+TESTING_GUIDE.md

@@ -1,496 +1,279 @@
 # Chaos Merchant - Autonomous YouTube Shorts Production
 
-**Status:** Production-Ready MVP (9 core agents + intelligence layer + QC)
-**Cost:** $2-5/month (Kokoro free, Google Trends free, Claude Haiku efficient)
-**Processing:** 40-50 min per video (7 Shorts from one input video)
+**Status:** Full pipeline + intelligence layer + dashboard + publisher built and unit-verified. First real-hardware run happened and surfaced real bugs (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md)); those are fixed, but **a clean end-to-end hardware run since the fixes has not yet happened.** Don't take "it should work now" as "it's been proven to work."
 
-Chaos Merchant takes a 10-minute raw gaming video and produces 7 finished, monetization-ready YouTube Shorts with zero manual intervention. Everything is automated: scene detection, script generation, voice synthesis, video production, thumbnail creation, quality validation, and upload-ready packaging.
+**Cost:** ~$2-5/month (Claude Haiku for nearly everything, Kokoro TTS free/local, Google Trends free)
+
+**Processing:** ~40-50 min per source video (7 Shorts from one ~10-minute input video) - a target, not yet measured on real hardware
+
+Chaos Merchant takes a raw gaming video and produces up to 7 finished YouTube Shorts - each with its own script, voiceover, captions, SEO metadata, and thumbnail - with zero manual intervention beyond dropping the video in a folder. A Flask dashboard lets you monitor runs and tune prompts without touching a terminal; an optional Publisher module can auto-upload to YouTube/TikTok/Instagram once you're ready to trust it.
 
 ## ⚡ Quick Start
 
 ```bash
-# Clone and setup (one command)
-git clone https://github.com/x0tyga/chaos-merchant.git && cd chaos-merchant && bash setup.sh
+git clone https://github.com/x0tyga/chaos-merchant.git && cd chaos-merchant
+bash setup.sh          # installs deps, downloads Kokoro model files, patches ImageMagick policy
+cp .env.example .env   # then edit .env: at minimum set ANTHROPIC_API_KEY and YOUTUBE_API_KEY
+source venv/bin/activate
 
-# Run on your first video
 cp ~/your_gaming_video.mp4 ./input/
 python main.py
 
-# 40-50 minutes later...
-# Open: output/batch_YYYYMMDD_HHMMSS/README.md
-# Follow upload instructions
-# Done!
+# ~40-50 minutes later, open:
+open output/batch_YYYYMMDD_HHMMSS/README.md
 ```
 
-## 📋 Complete Setup Guide (Non-Technical)
-
-See `SETUP.md` for step-by-step with API credential links and troubleshooting
-
-**TL;DR:** You need 4 API keys (all free tier available):
-1. Anthropic Claude: https://console.anthropic.com/
-2. YouTube Data API: https://console.cloud.google.com/
-3. Reddit API (optional): https://www.reddit.com/prefs/apps
-4. Your YouTube Channel: https://www.youtube.com/studio
+`setup.sh` checks for `ffmpeg`/ImageMagick, downloads Kokoro's model files via `curl`, and attempts to auto-patch ImageMagick's `policy.xml` if it would block caption rendering. It prints exactly what (if anything) still needs manual attention at the end. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for gotchas found so far.
 
 ## 🏗️ Architecture
 
 ```
-VIDEO INPUT
+VIDEO INPUT (watcher.py monitors INPUT_DIR)
     ↓
-[1. Clip Intelligence] → Scene detection + scoring
+[1. Clip Intelligence] → scene detection (OpenCV) + engagement scoring (librosa), selects up to 7 clips
     ↓
-[2. Script + Voiceover] → Claude scripts + Kokoro TTS
+[2. Script + Voiceover] → PER CLIP: Claude Haiku script gen + Kokoro TTS (ElevenLabs fallback)
     ↓
-[3. SEO Optimizer] → Titles, descriptions, hashtags
+[3. SEO Optimizer] → PER CLIP: titles, description, hashtags, keywords, tags
     ↓
-[4. Video Production] → Reframe 9:16, captions, audio ducking, color grade, watermark
+[4. Video Production] → reframe to 9:16, burned-in captions, music ducking, color grade, watermark, export
     ↓
-[5. Thumbnail Generation] → Canva MCP (session) or brief-only (home machine)
+[5. Thumbnail Generation] → PER CLIP: Canva MCP (active Claude Code session) or brief-only (autonomous run)
     ↓
-[6. Quality Control] → Validate codec, resolution, audio sync, captions, content similarity
+[6. Quality Control] → codec/resolution/duration/audio-sync checks, caption detection, content similarity
     ↓
-[7. Output Packaging] → Clean folder, upload order, metadata JSON
+[7. Output Packaging] → batch_<id>/ folder: shorts/, thumbnails/, upload_metadata/, manifests/, README.md
     ↓
-[8-15. Intelligence Agents] → Hook library, channel memory, trend analysis, competitor monitoring (scheduled)
-    ↓
-READY TO UPLOAD (7 MP4s + thumbnails + metadata + checklist)
+READY TO UPLOAD - manually, or via the Publisher module (off by default)
+
+Scheduled in parallel (main.py + core/scheduler.py):
+  Trend Intelligence (daily 7am) · Competitor Monitor (every 3h)
+  Analytics & Feedback (daily 9am) · Comment Mining (weekly Sun 10am)
+  Thumbnail Research (weekly Sun 10am)
 ```
+
+Each of the up to 7 shorts gets its **own** script, voiceover, SEO metadata, and thumbnail brief - this was not always true (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for when/why it changed).
 
 ## 🚀 Features
 
 **Production Pipeline (Steps 1-7):**
-- Scene detection with engagement scoring
-- AI script generation (Claude Haiku)
-- Kokoro TTS voiceover (free, local, 2-3 min)
-- Professional video production: reframing to 9:16, captions burned-in, music ducking (-6dB), color grading, watermark overlay
-- Canva MCP thumbnail generation (or brief-only fallback for home machine)
-- Comprehensive quality control (codec, resolution, audio sync, caption verification, content deduplication)
-- Clean output packaging with 30-second readable README + upload checklist
+- Scene detection with engagement scoring; genuinely fewer than 7 clips is possible and expected for short/atypical source footage, not a bug
+- Per-clip AI script generation (Claude Haiku) + Kokoro TTS voiceover (free, local; ElevenLabs fallback if configured)
+- Reframing to 9:16, burned-in captions, music ducking, color grading, channel watermark - each tracked as actually-applied-or-not per short, not assumed
+- Per-clip SEO metadata and thumbnail briefs - real Canva MCP images in an active Claude Code session, detailed manual-creation briefs otherwise
+- Three-tier quality control (video file validation, metadata completeness, PASS/WARNING/manual_review routing)
+- Upload-ready batch folder: 30-second README, upload checklist, per-short metadata JSON
 
-**Intelligence Layer (Steps 12-16, Scheduled):**
-- Hook Library: tracks every script hook, prevents 7-day repetition, enforces 3+ style diversity
-- Channel Memory: tracks every published short, detects series opportunities, prevents 14-day topic repeat
-- Trend Intelligence: daily 7am content strategy with scored trends
-- Competitor Monitor: 3-hour alerts on viral spikes (high-quality, deduped)
-- Scheduler: manages all agents, prevents double-firing, manages YouTube API quota
+**Intelligence Layer (scheduled agents):**
+- **Hook Library** - tracks every hook used, prevents 7-day repetition, status progression new → testing → proven_winner/declining
+- **Channel Memory** - tracks every produced short, detects series opportunities, prevents 14-day topic repeat, powers the content gap report
+- **Trend Intelligence** - daily brief from Reddit (PRAW), RSS feeds, and Google Trends (via `pytrends-modern`, unofficial/best-effort), with a hardcoded-fallback safety net if all real sources are unavailable
+- **Competitor Monitor** - every 3h, real YouTube Data API channel/video lookups, alerts on view spikes; starts with an empty competitor list, add channels via the dashboard or `python -m agents.competitor_monitor add @Channel`
+- **Analytics & Feedback** - real YouTube performance pulls at 48h/7d marks, updates Hook Library with real CTR/retention, spike detection with desktop notifications, confidence-gated prompt auto-tuning
+- **Comment Mining** - weekly sentiment/pattern analysis on your own + competitor comments, feeds an ideas backlog and vocabulary reference
+- **Thumbnail Research** - weekly trending-Shorts-thumbnail scrape (yt-dlp) + color/composition analysis, cross-referenced against your own CTR once you have enough data
 
-**Data Integrity:**
-- SQLite databases with WAL mode (crash-safe)
-- Automatic timestamped backups before every operation
-- Obsessive logging on all reads/writes
-- QC validation: blocks bad content before upload
+All intelligence agents are designed to degrade cleanly to "no data yet" on a fresh channel rather than crash - see each agent's own docstring for exactly how.
 
-## 📊 Performance
+**Dashboard** (`dashboard/`, Flask): pipeline status/queue, output batches with real viral scores, analytics charts, trends/competitor/ideas feed, research findings, and a Settings page to edit `.env` and any prompt file **directly in the browser** - no terminal required for day-to-day tuning. See "Dashboard" below.
+
+**Publisher** (`core/publisher.py`): optional auto-upload to YouTube, TikTok, and Instagram, each independently gated by an env flag that **defaults to off**. See "Publisher" below.
+
+## 📊 Performance (targets, not yet measured on real hardware)
 
 | Component | Target Time | Hardware |
 |-----------|-------------|----------|
 | Clip Intelligence | 4-5 min | CPU (OpenCV, librosa) |
-| Voiceover (Kokoro) | 2-3 min | CPU (local TTS) |
-| SEO Optimizer | 1 min | Claude API |
-| Video Production | 20-25 min | CPU (ffmpeg) |
-| Thumbnails | 2-3 min | Canva MCP or brief |
+| Script + Voiceover (Kokoro, x7) | 2-3 min | CPU (local TTS) |
+| SEO Optimizer (x7) | ~1 min | Claude API |
+| Video Production (x7) | 20-25 min | CPU (ffmpeg) |
+| Thumbnails (x7) | 2-3 min | Canva MCP or brief |
 | Quality Control | 1-2 min | Validation |
-| Output Packaging | 1 min | File organization |
-| **TOTAL** | **40-50 min** | **Intel i3 CPU acceptable** |
+| Output Packaging | ~1 min | File organization |
+| **TOTAL** | **40-50 min** | **Intel i3 CPU, target only** |
 
 ## 💰 Cost Breakdown
 
-**Monthly (after initial setup):**
-- Kokoro TTS: $0 (free, local)
-- Google Trends API: $0 (free tier)
-- YouTube Data API: $0 (free tier, 10k quota/day)
-- Claude API (Haiku): ~$2-5 (script gen + SEO)
-- Canva MCP: $0 (included with Claude Code session)
-- **TOTAL: $2-5/month**
+The dashboard's Analytics page shows real, measured spend (`core/cost_tracker.py` logs every Claude API call's actual token usage). Rough monthly estimate before you have real data:
 
-Original estimate: $40-60/month. Actual: 90% cheaper.
+- Kokoro TTS: $0 (free, local)
+- Google Trends / Reddit / RSS: $0 (free tier)
+- YouTube Data API: $0 (free tier, 10k quota/day)
+- Claude API (mostly Haiku, 7x per-clip calls across script/SEO/thumbnail per video): ~$2-5/month at moderate volume
+- Canva MCP: $0 (included with an active Claude Code session; brief-only otherwise)
 
 ## 🔧 Configuration
 
-Edit `.env` file to customize:
+Copy `.env.example` to `.env` and fill in what you need - the example file documents every variable inline, including which are required vs. optional. Key ones:
 
 ```env
-# Core
+# Required
 ANTHROPIC_API_KEY=sk-ant-...
 YOUTUBE_API_KEY=...
 
 # Video
-MIN_CLIP_DURATION=15       # seconds
-MAX_CLIP_DURATION=45       # seconds
-TARGET_SHORTS_COUNT=7      # how many Shorts to produce
+MIN_CLIP_DURATION=15
+MAX_CLIP_DURATION=45
+VIRAL_SCORE_THRESHOLD=3.0
 
-# Voice (optional)
-ELEVENLABS_API_KEY=...     # premium fallback (not required)
+# Optional voice fallback
+ELEVENLABS_API_KEY=...
+ELEVENLABS_VOICE_ID=...
 
-# Captions
-CAPTION_FONT_PATH=/path/to/BebasNeue.ttf   # custom font (optional)
+# Dashboard (127.0.0.1 by default - no built-in auth, don't expose this)
+DASHBOARD_HOST=127.0.0.1
+DASHBOARD_PORT=5050
 
-# Channel
-CHANNEL_NAME=Chaos Merchant  # watermark text
+# Publisher (all off by default)
+AUTO_POST_YOUTUBE=false
+AUTO_POST_TIKTOK=false
+AUTO_POST_INSTAGRAM=false
 ```
 
-## 🎯 Deployment Modes
+## 🖥️ Dashboard
 
-**Mode 1: Claude Code Active Session (Cloud)**
-- Canva MCP available → generates thumbnails automatically
-- Full end-to-end automation
-- Best for: Testing, cloud deployments, GitHub Actions
+```bash
+python dashboard/app.py
+# open http://127.0.0.1:5050
+```
 
-**Mode 2: Home Machine Autonomous (No Session)**
-- Canva MCP unavailable → fallback to brief-only mode
-- Generate detailed visual briefs instead of images
-- User manually creates thumbnails on Canva.com
-- Best for: Local daily production, privacy-first
+Pages: **Home** (queue, checkpoints, scheduled job status, quota, cost, publisher state), **Output** (every batch with QC status and real logged viral scores), **Analytics** (Chart.js views/CTR/retention, top hooks, API cost by agent), **Trends** (today's brief, competitor alerts, ideas backlog, add-competitor-by-URL), **Research** (thumbnail research, comment insights, content gap report), **Settings** (edit `.env` and any `prompts/*.txt` file in the browser - saving `.env` backs up the previous version first), **Logs** (tails `logs/chaos_merchant.log`, auto-refreshing).
 
-Both modes produce output in same folder structure. Only thumbnail generation differs.
+This is a single-user local tool with **no authentication**. Don't bind `DASHBOARD_HOST` to `0.0.0.0` on a shared network without putting your own auth in front of it - Settings can read and write `.env`, which holds your API keys.
 
-## 🧠 Intelligence System
+## 📤 Publisher
 
-**Hook Library** - Learns what works:
-- Tracks every script hook with CTR + retention
-- Prevents 7-day hook repetition
-- Enforces minimum 3 active writing styles (diversity)
-- Auto-generates variations from proven winners
-- Status progression: new → testing → proven_winner / declining → retired
+`core/publisher.py` can auto-upload finished shorts to YouTube, TikTok, and Instagram. **All three are off by default** (`AUTO_POST_YOUTUBE`/`AUTO_POST_TIKTOK`/`AUTO_POST_INSTAGRAM=false`) - nothing is ever posted anywhere until you deliberately flip a flag.
 
-**Channel Memory** - Knows what you've done:
-- Tracks all published shorts + performance
-- Prevents 14-day topic repetition
-- Detects series opportunities (top 10% performers)
-- Generates weekly content gap reports
-- Feeds back to trend intelligence
+- **YouTube**: resumable upload + thumbnail via the Data API v3. Needs a one-time OAuth authorization: `python -m core.publisher setup-youtube`.
+- **TikTok**: Content Posting API direct-post. Needs an approved TikTok developer app (unaudited apps can only post privately) and a token obtained via TikTok's own web OAuth flow (not something this tool can do for you - see the module docstring).
+- **Instagram**: Graph API two-step Reels publish. Needs a Meta Business app, an Instagram Professional account, and a **publicly reachable URL** for your finished videos (`PUBLIC_VIDEO_BASE_URL`) - the Graph API fetches from a URL, it doesn't accept a direct file upload.
 
-**Trend Intelligence** - Finds next big thing:
-- Daily 7am delivery
-- Google Trends + Reddit (PRAW) + RSS feeds (all free)
-- Quality scoring: velocity + volume + novelty
-- Gaming calendar awareness (GTA6 release, Game Awards, etc.)
-- 3 distinct angles per trend (Claude-generated)
+YouTube's upload path uses a stable, long-unchanged API and this codebase's existing OAuth pattern. TikTok's and Instagram's request shapes are built to each platform's documented API but have not been exercised against live endpoints in this project yet - review current docs before enabling either for the first time.
 
-**Competitor Monitor** - Watch the space:
-- Every 3 hours, checks 5-15 competitors
-- Alerts on viral spikes (>10k views/6h configurable)
-- Alert quality > quantity (deduped, novelty-checked)
-- Claude-powered analysis + 3 angles per alert
-- Urgent 2h vs lazy 24h post recommendations
+## 🎯 Deployment Modes (thumbnails only)
 
-## 🚨 Known Limitations (Acceptable for Launch)
+**Active Claude Code session** (cloud/interactive): Canva MCP available, thumbnails generated as real images automatically.
 
-**Caption Detection False Positives**
-- Frame analysis looks for bright text in bottom 15% of video
-- Game UI elements can trigger false positives
-- Mitigation: Monitor on first 1-2 batches, refine thresholds
-- Impact: Low (worst case: manual review, catches false positives)
-
-**Content Similarity Inactive First 14 Days**
-- Requires channel history to work
-- Expected: All new content shows "similarity check skipped" for first 2 weeks
-- After 14 days: Full deduplication active
-- Impact: First batch has no topic repeat protection (single-batch risk)
-
-Both are documented in CLAUDE.md and acceptable for v1 launch.
+**Autonomous run, no session** (e.g. `python main.py` on a home machine via cron): Canva MCP unavailable, falls back to a detailed brief + Canva prompt per short for manual creation. Everything else in the pipeline is identical either way.
 
 ## 📚 Documentation
 
-- **SETUP.md** - Complete non-technical setup guide (API keys, environment, testing)
-- **CLAUDE.md** - Complete codebase map (what every file does, how agents connect, modification guide)
-- **TESTING_GUIDE.md** - How to run first test, diagnose failures, common issues
-- **README.md** (this file) - Overview and quick reference
+- **README.md** (this file) - overview and quick reference
+- **[CLAUDE.md](CLAUDE.md)** - codebase map: what every file does, key data structures, modification guide
+- **[HANDOFF.md](HANDOFF.md)** - current project state, what changed recently, what to do next
+- **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** - every issue found so far, with status
+- **[TESTING_GUIDE.md](TESTING_GUIDE.md)** - pre-flight checklist and diagnostics
 
 ## 🧪 Testing
 
 ```bash
-# Test your setup (credentials, database, all systems)
-python test_credentials.py
+# Run the pipeline on a video
+python main.py
 
-# Run on sample video
-python main.py  # with input/sample.mp4
+# Run a single agent directly
+python -m agents.trend_intelligence
+python -m agents.comment_mining
+python -m agents.thumbnail_research
+python -m agents.analytics_feedback
 
-# Check database
-sqlite3 data/chaos_merchant.db "SELECT COUNT(*) FROM hooks;"
+# Inspect the database
+sqlite3 data/chaos_merchant.db "SELECT * FROM hooks LIMIT 5;"
+sqlite3 data/chaos_merchant.db "SELECT * FROM channel_shorts ORDER BY publish_date DESC LIMIT 5;"
 
-# View latest trend intelligence
+# Check latest scheduled-agent output
 cat data/trend_intelligence_latest.json
-
-# View latest competitor alerts
 cat data/competitor_alerts_latest.json
 ```
 
-See TESTING_GUIDE.md for complete test procedures and diagnostics.
+See [TESTING_GUIDE.md](TESTING_GUIDE.md) for the full pre-flight checklist and failure diagnostics.
 
 ## 📁 Project Structure
 
 ```
 chaos-merchant/
-├── main.py                  # Entry point
-├── setup.sh                 # One-command setup
-├── requirements.txt         # Python dependencies
-├── .env.example             # Configuration template
-├── README.md               # This file
-├── SETUP.md                # Complete setup guide
-├── CLAUDE.md               # Codebase documentation
-├── TESTING_GUIDE.md        # Testing procedures
+├── main.py                     # Entry point: pre-flight checks, watcher, scheduler
+├── setup.sh                    # One-command setup (deps, Kokoro download, ImageMagick fix)
+├── requirements.txt
+├── .env.example                 # Every config variable, documented inline
+├── Dockerfile / docker-compose.yml
 │
 ├── core/
-│   ├── pipeline.py         # Step 1-7 orchestrator
-│   ├── memory.py           # Hook Library + Channel Memory
-│   ├── scheduler.py        # Agent scheduler + quota management
-│   └── quality_test.py     # QC validation test
+│   ├── pipeline.py              # Steps 1-7 orchestrator, checkpoint/recovery
+│   ├── memory.py                 # Hook Library + Channel Memory (SQLite)
+│   ├── scheduler.py              # Agent scheduling, quota management
+│   ├── recovery.py               # Checkpoint listing/cleanup
+│   ├── publisher.py              # YouTube/TikTok/Instagram auto-upload (off by default)
+│   ├── cost_tracker.py           # Real Claude API spend tracking
+│   ├── notifications.py          # Desktop notifications (spike alerts)
+│   └── quality_test.py           # Kokoro vs ElevenLabs comparison
 │
 ├── agents/
-│   ├── watcher.py          # File monitoring (Step 0)
-│   ├── clip_intelligence.py       # Scene detection (Step 1)
-│   ├── script_voiceover.py        # Script gen + TTS (Step 2)
-│   ├── seo_optimizer.py           # Metadata (Step 3)
-│   ├── video_production.py        # Video assembly (Step 4)
-│   ├── thumbnail.py               # Thumbnail gen (Step 5)
-│   ├── quality_control.py         # Validation (Step 6)
-│   ├── output_packaging.py        # Upload prep (Step 7)
-│   ├── trend_intelligence.py      # Daily trends (Step 12)
-│   ├── competitor_monitor.py      # Viral alerts (Step 13)
-│   └── ... (remaining agents)
+│   ├── watcher.py                     # File system monitoring
+│   ├── clip_intelligence.py           # Scene detection + scoring (Step 1)
+│   ├── script_voiceover.py            # Per-clip script + Kokoro/ElevenLabs TTS (Step 2)
+│   ├── seo_optimizer.py               # Per-clip SEO metadata (Step 3)
+│   ├── video_production.py            # ffmpeg/moviepy assembly (Step 4)
+│   ├── thumbnail.py                   # Canva MCP / brief-only (Step 5)
+│   ├── quality_control.py             # Validation + routing (Step 6)
+│   ├── output_packaging.py            # Batch folder assembly (Step 7)
+│   ├── trend_intelligence.py          # Daily trend brief
+│   ├── competitor_monitor.py          # Viral-spike alerts
+│   ├── analytics_feedback.py          # Real performance tracking + hook scoring
+│   ├── comment_mining.py              # Weekly comment sentiment/patterns
+│   └── thumbnail_research.py          # Weekly trending-thumbnail research
 │
-├── config/
-│   └── competitors.json    # Competitor watchlist
+├── dashboard/
+│   ├── app.py                    # Flask routes
+│   ├── data.py                   # Read-only data access layer
+│   ├── templates/                # Home, Output, Analytics, Trends, Research, Settings, Logs
+│   └── static/style.css
 │
-├── prompts/
-│   ├── script_generation.txt
-│   ├── seo_optimization.txt
-│   ├── ... (all Claude prompts)
-│
-├── data/
-│   ├── chaos_merchant.db           # SQLite databases
-│   ├── quota_tracker.json          # YouTube API quota
-│   ├── job_tracker.json            # Job scheduling
-│   ├── trend_intelligence_latest.json
-│   ├── competitor_alerts_latest.json
-│   ├── backups/                    # Auto backups
-│   └── channel_memory/             # Historical data
-│
-├── input/                  # Your raw videos go here
-├── output/                 # Batch folders created here
-└── tests/
-    ├── sample_video.mp4   # Test video
-    └── ... (test files)
+├── config/                       # competitors.json, gaming_calendar.json (auto-created)
+├── prompts/                      # Human-editable Claude prompt templates
+├── data/                         # SQLite DB, trackers, checkpoints, agent output (git-ignored)
+├── analytics/                    # performance_log.csv (git-ignored)
+├── logs/                         # chaos_merchant.log, rotated (git-ignored)
+├── input/                        # Drop source videos here
+└── output/                       # batch_<id>/ folders land here
 ```
 
 ## 🔄 Workflow
 
-1. **Drop video in input folder**
-   ```bash
-   cp ~/my_gaming_video.mp4 ./input/
-   ```
-
-2. **Run pipeline**
-   ```bash
-   python main.py
-   ```
-
-3. **Pipeline processes automatically**
-   - Step 1: Clip detection (4-5 min)
-   - Step 2: Script generation + voiceover (2-3 min)
-   - Step 3: SEO metadata (1 min)
-   - Step 4: Video production (20-25 min)
-   - Step 5: Thumbnails (2-3 min)
-   - Step 6: Quality control (1-2 min)
-   - Step 7: Output packaging (1 min)
-   - Total: 40-50 minutes
-
-4. **Open batch folder**
-   ```bash
-   open output/batch_YYYYMMDD_HHMMSS/README.md
-   ```
-
-5. **Follow upload checklist**
-   - Read 30-second summary
-   - Copy-paste metadata per video
-   - Upload 7 Shorts in order
-   - Done!
-
-6. **Scheduled intelligence runs daily**
-   - 7am: Trend Intelligence
-   - 9am: Analytics Feedback
-   - Every 3h: Competitor Monitor
-   - Weekly Sunday: Hook Library optimization
+1. Drop a video in `input/` (or let `main.py`'s startup scan pick up anything already there).
+2. `python main.py` - runs Steps 1-7 automatically once the watcher sees the file.
+3. Open `output/batch_<id>/README.md` for the 30-second summary and upload checklist, or check the dashboard's Output page.
+4. Upload manually, or enable the relevant `AUTO_POST_*` flag once you trust the Publisher module.
+5. Scheduled intelligence agents run in the background per the schedule above - check the dashboard's Trends/Research pages, or `data/*_latest.json`.
 
 ## 🤔 FAQ
 
-**Q: Do I need GPU?**
-A: No. CPU is fine (Intel i3 acceptable). Kokoro TTS and ffmpeg are CPU-optimized.
+**Do I need a GPU?** No - CPU is fine, ffmpeg/Kokoro are CPU-oriented. Never measured on real hardware yet, so "acceptable" timing is a target.
 
-**Q: How much does it cost to run?**
-A: $2-5/month (Claude API usage). Everything else is free tier.
+**How much does it cost to run?** Check the dashboard's Analytics page for real measured spend. Rough estimate: $2-5/month in Claude API calls.
 
-**Q: Can I run this locally?**
-A: Yes. All video processing runs on your machine. Only Claude API calls leave your machine.
+**What if a step fails?** The pipeline checkpoints after each step; rerun `python main.py` and it resumes from the last successful step for that video.
 
-**Q: What if a step fails?**
-A: Pipeline has checkpoint/recovery. Rerun `python main.py` and it resumes from last successful step.
+**Can I customize the output?** Yes - edit files under `prompts/` (directly in the dashboard's Settings page, or by hand) and `.env`. See [CLAUDE.md](CLAUDE.md) for the modification guide.
 
-**Q: Can I customize the output?**
-A: Yes. Edit prompts/ files or .env configuration. See CLAUDE.md for modification guide.
-
-**Q: How do I debug failures?**
-A: See TESTING_GUIDE.md for diagnostics. Check logs in output/batch_*/VALIDATION.log.
-
-## 📞 Support
-
-- **Questions:** Check CLAUDE.md (codebase map) or TESTING_GUIDE.md (diagnostics)
-- **Bugs:** Enable verbose logging, check VALIDATION.log
-- **Feature Requests:** GitHub Issues
-
-## 📜 License
-
-Open source. Use freely. See LICENSE file.
-
----
-
-**Built by Chaos Merchant.**
-**Last updated:** 2026-07-02
-**Maintained:** Actively
-
-**Parallel Intelligence Agents:**
-- Analytics & Feedback (daily 9am)
-- Trend Intelligence (daily 7am)
-- Competitor Monitoring (every 3h)
-- Comment Mining (weekly)
-- Thumbnail Research (weekly)
-
-## Quick Start
-
-```bash
-# Setup
-./setup.sh
-
-# Activate virtual environment
-source venv/bin/activate
-
-# Edit environment
-nano .env
-
-# Run
-python main.py
-```
-
-## Configuration
-
-Copy `.env.example` to `.env` and add your API keys:
-- `ANTHROPIC_API_KEY`: Claude API key
-- `YOUTUBE_API_KEY`: YouTube Data API key
-- `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`: Reddit API credentials
-- `ELEVENLABS_API_KEY`: (Optional) For fallback premium voiceover
-
-## Cost Estimate
-
-**Monthly (MVP):** ~$2-5/month
-- Kokoro TTS: Free
-- Canva MCP: Free (included)
-- Claude API: $2-5/month
-- Google Trends API: Free
-- YouTube Data API: Free tier
-
-## Processing Time
-
-Target: 40-50 minutes for 7 shorts from 10-minute source video
-
-**Breakdown:**
-- Clip analysis: 4-5 min
-- Script generation: 2 min
-- Voiceover generation (Kokoro): 2-3 min
-- Caption alignment (Whisper): 8-10 min
-- Video production (ffmpeg): 20-25 min
-- Thumbnail generation (Canva): 2-3 min
-- QC checks: 2-3 min
-
-## Project Structure
-
-```
-chaos-merchant/
-├── agents/          # Autonomous agent implementations
-├── core/            # Pipeline, scheduler, publisher
-├── prompts/         # Human-editable prompt templates
-├── config/          # settings.py, API configs
-├── tests/           # Test suite
-├── data/            # SQLite database, logs
-├── input/           # Raw video folder
-├── output/          # Finished shorts
-├── main.py          # Entry point
-├── requirements.txt # Python dependencies
-├── setup.sh         # Setup script
-├── CLAUDE.md        # Developer guide
-└── README.md        # This file
-```
-
-## Build Sequence (20 Steps)
-
-**Phase 1: Foundation (Steps 1-5)**
-1. ✅ Repo Scaffold
-2. Watcher Agent
-3. Clip Intelligence
-4. Script + Voiceover (Kokoro TTS primary)
-5. SEO Optimizer
-
-**Phase 2: Production (Steps 6-9)**
-6. Video Production
-7. Thumbnail Generation (Canva MCP)
-8. Quality Control
-9. Output Packaging
-
-**Phase 3: Intelligence (Steps 10-15)**
-10. Core Pipeline Integration
-11. Analytics & Feedback
-12. Trend Intelligence
-13. Competitor Monitoring
-14. Comment Mining
-15. Hook Library + Channel Memory
-
-**Phase 4: Orchestration (Steps 16-18)**
-16. Scheduler
-17. Dashboard (Flask UI)
-18. Publisher Module
-
-**Phase 5: Deployment (Steps 19-20)**
-19. Docker
-20. Documentation
+**How do I debug a failure?** Check `output/*_qc_manifest.json` for QC-specific failures, the dashboard's Logs page or `logs/chaos_merchant.log` for everything else, and [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for issues already diagnosed.
 
 ## Technology Stack
 
 | Component | Technology |
 |-----------|-----------|
-| **LLM** | Claude API (Haiku + Sonnet) |
-| **Voiceover** | Kokoro TTS (primary) |
-| **Thumbnails** | Canva MCP connector |
-| **Video** | ffmpeg + moviepy |
-| **Captions** | Whisper (OpenAI) |
-| **Scene Detection** | OpenCV |
-| **Audio Analysis** | librosa |
-| **Trends** | Google Trends API + PRAW + RSS |
-| **Database** | SQLite |
-| **UI** | Flask |
-| **Scheduling** | Python schedule library |
-
-## Decisions
-
-- ✅ No GPU requirement (Intel i3 compatible)
-- ✅ Kokoro TTS primary (free alternative to ElevenLabs)
-- ✅ Canva MCP for thumbnails (replaces Ideogram, free)
-- ✅ Hybrid testing approach (test both voices in Step 4)
-- ✅ Google Trends + PRAW + RSS (no TikTok API cost)
-- ✅ 40-50 min processing time target
-- ✅ Graceful degradation & fallbacks throughout
-
-## Resources
-
-- [Original Plan](/root/.claude/plans/i-have-a-plan-toasty-bunny.md)
-- [Claude API Docs](https://api.anthropic.com/docs)
-- [YouTube Data API](https://developers.google.com/youtube/v3)
-- [Kokoro TTS](https://github.com/hexgrad/kokoro)
-
-## Status
-
-**Phase 1 Status:** ✅ Step 1 (Repo Scaffold) Complete
-**Next:** Step 2 (Watcher Agent)
+| LLM | Claude API (Haiku for per-clip generation) |
+| Voiceover | Kokoro TTS (local, free), ElevenLabs (optional fallback) |
+| Thumbnails | Canva MCP connector, or brief-only fallback |
+| Video | ffmpeg + moviepy 2.x |
+| Captions | Burned in from the generated script's own timing - no speech-to-text transcription involved |
+| Scene Detection | OpenCV |
+| Audio Analysis | librosa |
+| Trends | Reddit (PRAW) + RSS + Google Trends (`pytrends-modern`, unofficial) |
+| Database | SQLite (WAL mode) |
+| Dashboard | Flask |
+| Scheduling | `schedule` (Python library) |
 
 ---
 
-Made with 🤖 by Claude Code
+**Maintainer:** Actively maintained. See [HANDOFF.md](HANDOFF.md) for current state and next steps.

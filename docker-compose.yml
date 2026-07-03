@@ -1,0 +1,68 @@
+# `docker-compose up` should require nothing beyond a filled-in .env (copy
+# .env.example -> .env and fill in ANTHROPIC_API_KEY / YOUTUBE_API_KEY at
+# minimum) - everything else (deps, ffmpeg, ImageMagick policy, Kokoro model
+# files, database schema) is baked into the image at build time.
+#
+# Two services share the same bind-mounted directories so data survives
+# container restarts and is visible on the host without `docker cp`:
+#   pipeline  - runs main.py (watcher + scheduler), the long-running worker
+#   dashboard - runs dashboard/app.py, exposed on DASHBOARD_PORT (default 5050)
+#
+# Start everything:            docker-compose up
+# Start just the dashboard:    docker-compose up dashboard
+# Rebuild after a code change: docker-compose up --build
+
+services:
+  pipeline:
+    build: .
+    container_name: chaos-merchant-pipeline
+    command: ["python3", "main.py"]
+    env_file:
+      - .env
+    environment:
+      INPUT_DIR: /app/input
+      OUTPUT_DIR: /app/output
+      DATA_DIR: /app/data
+      LOG_DIR: /app/logs
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./analytics:/app/analytics
+      - ./config:/app/config
+      - ./prompts:/app/prompts
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    container_name: chaos-merchant-dashboard
+    command: ["python3", "dashboard/app.py"]
+    env_file:
+      - .env
+    environment:
+      INPUT_DIR: /app/input
+      OUTPUT_DIR: /app/output
+      DATA_DIR: /app/data
+      LOG_DIR: /app/logs
+      # Must bind 0.0.0.0 *inside* the container or Docker's port mapping
+      # below can't reach it - this does not widen exposure beyond the
+      # host's own interfaces, `ports:` already controls that boundary the
+      # same as any other locally-run compose service. This is NOT the
+      # same as setting DASHBOARD_HOST=0.0.0.0 on a bare-metal install,
+      # which really would expose it network-wide - see README.
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: "5050"
+    ports:
+      - "${DASHBOARD_PORT:-5050}:5050"
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./analytics:/app/analytics
+      - ./config:/app/config
+      - ./prompts:/app/prompts
+    restart: unless-stopped
+    depends_on:
+      - pipeline
