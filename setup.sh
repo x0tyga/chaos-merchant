@@ -140,9 +140,11 @@ fi
 if [ "$KOKORO_OK" -eq 0 ]; then
     echo "$STEP. Install Kokoro TTS (REQUIRED unless you're using ElevenLabs only):"
     echo "     pip install kokoro-onnx"
-    echo "     Then download the model files (kokoro-v1.0.onnx, voices-v1.0.bin)"
-    echo "     from https://github.com/thewh1teagle/kokoro-onnx/releases"
-    echo "     and set KOKORO_MODEL_PATH / KOKORO_VOICES_PATH in .env"
+    echo "     Then download BOTH model files from the SAME release tag"
+    echo "     (mixing versions causes load failures):"
+    echo "       wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+    echo "       wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+    echo "     and set KOKORO_MODEL_PATH / KOKORO_VOICES_PATH in .env to their paths"
     STEP=$((STEP+1))
     echo ""
 fi

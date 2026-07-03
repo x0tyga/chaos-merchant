@@ -100,10 +100,17 @@ class KokoroTTS:
     """Kokoro TTS voice synthesis (free, local, primary engine).
 
     Uses the kokoro-onnx package (module name: kokoro_onnx), which requires
-    two model files downloaded separately (not installed via pip):
+    two matching-version model files downloaded separately (not installed
+    via pip), from the SAME release tag:
     - ONNX model: KOKORO_MODEL_PATH (default: kokoro-v1.0.onnx)
     - Voices file: KOKORO_VOICES_PATH (default: voices-v1.0.bin)
-    Download from: https://github.com/thewh1teagle/kokoro-onnx/releases
+
+        wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+        wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+
+    Mixing files from different release tags (e.g. a v1.0 voices file with
+    a v1.1 onnx model) is a known source of load failures - always pull
+    both files from the same release tag.
     """
 
     def __init__(self):
@@ -122,12 +129,46 @@ class KokoroTTS:
         if not os.path.exists(self.model_path) or not os.path.exists(self.voices_path):
             logger.warning(
                 f"⚠️  Kokoro model files not found (KOKORO_MODEL_PATH={self.model_path}, "
-                f"KOKORO_VOICES_PATH={self.voices_path}). Download from "
-                f"https://github.com/thewh1teagle/kokoro-onnx/releases"
+                f"KOKORO_VOICES_PATH={self.voices_path}). Download both files from the SAME "
+                f"release tag: https://github.com/thewh1teagle/kokoro-onnx/releases"
             )
             return False
 
         return True
+
+    @staticmethod
+    def _construct_kokoro(model_path, voices_path):
+        """
+        kokoro-onnx's Kokoro() constructor loads the voices file via
+        np.load(voices_path) without passing allow_pickle=True. The
+        official voices-*.bin release files are npz archives containing
+        pickled style-vector objects, so under NumPy's allow_pickle=False
+        default this raises: "This file contains pickled (object) data.
+        ... load it unsafely using the allow_pickle= keyword argument".
+        This is a known upstream limitation (thewh1teagle/kokoro-onnx#161),
+        not a corrupt/wrong download - kokoro-onnx just never sets the flag.
+
+        We don't control that internal np.load() call, so allow_pickle is
+        patched into numpy's default only for the duration of this
+        constructor call. This is safe specifically because voices_path is
+        the official release file the operator downloaded themselves, not
+        arbitrary/untrusted input - pickle loading is only ever a security
+        risk for files from an untrusted source.
+        """
+        import numpy as np
+        from kokoro_onnx import Kokoro
+
+        original_load = np.load
+
+        def _load_allow_pickle(*args, **kwargs):
+            kwargs.setdefault('allow_pickle', True)
+            return original_load(*args, **kwargs)
+
+        np.load = _load_allow_pickle
+        try:
+            return Kokoro(model_path, voices_path)
+        finally:
+            np.load = original_load
 
     def generate(self, text, voice='bella', output_path=None):
         """
@@ -147,14 +188,13 @@ class KokoroTTS:
         logger.info(f"🎙️  Generating voiceover with Kokoro ({voice})...")
 
         try:
-            from kokoro_onnx import Kokoro
             import soundfile as sf
 
             if output_path is None:
                 output_path = f"/tmp/voiceover_kokoro_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
 
             # Generate audio
-            tts = Kokoro(self.model_path, self.voices_path)
+            tts = self._construct_kokoro(self.model_path, self.voices_path)
             samples, sample_rate = tts.create(text, voice=voice)
 
             # Save to file
