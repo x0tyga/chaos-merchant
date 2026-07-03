@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Research{% endblock %}
+{% block content %}
+<h1>Research</h1>
+
+<div class="card">
+  <h2>Thumbnail Research (latest)</h2>
+  {% if thumbnail_research and thumbnail_research.status == 'success' %}
+    <p class="muted">{{ thumbnail_research.timestamp }} — {{ thumbnail_research.thumbnails_analyzed }} thumbnails analyzed, own data available: {{ thumbnail_research.own_data_available }}</p>
+    <h2>Patterns</h2>
+    <ul>
+      {% for p in thumbnail_research.patterns %}<li>{{ p }}</li>{% endfor %}
+    </ul>
+    <h2>Prompt Additions{% if thumbnail_research.prompt_updated %} (applied){% endif %}</h2>
+    <ul>
+      {% for a in thumbnail_research.recommended_prompt_additions %}<li>{{ a }}</li>{% endfor %}
+    </ul>
+  {% else %}
+    <div class="empty-state">No thumbnail research yet - runs weekly Sunday 10am, or trigger manually: python -m agents.thumbnail_research</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Comment Insights (latest)</h2>
+  {% if comment_insights %}
+    <p class="muted">{{ comment_insights.timestamp or comment_insights.generated_at }}</p>
+    {% if comment_insights.content_ideas %}
+      <h2>Content Ideas</h2>
+      <ul>{% for i in comment_insights.content_ideas %}<li>{{ i }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if comment_insights.vocabulary_patterns %}
+      <h2>Vocabulary Patterns</h2>
+      <ul>{% for v in comment_insights.vocabulary_patterns %}<li>{{ v }}</li>{% endfor %}</ul>
+    {% endif %}
+  {% else %}
+    <div class="empty-state">No comment insights yet - runs weekly Sunday 10am, or trigger manually: python -m agents.comment_mining</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Content Gap Report (30-day window)</h2>
+  {% if gap_report.topics_covered %}
+    <table>
+      <thead><tr><th>Topic</th><th>Shorts</th></tr></thead>
+      <tbody>
+      {% for topic, count in gap_report.coverage_breakdown.items() %}
+        <tr><td>{{ topic }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">No shorts published in the last 30 days yet.</div>
+  {% endif %}
+</div>
+{% endblock %}

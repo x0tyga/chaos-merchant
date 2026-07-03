@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}{{ batch.batch_id }}{% endblock %}
+{% block content %}
+<h1>{{ batch.batch_id }}</h1>
+<p><a href="{{ url_for('output_list') }}">&larr; back to all batches</a></p>
+
+<div class="grid grid-3">
+  <div class="stat">
+    <div class="label">QC Status</div>
+    <div class="value">{{ batch.manifest.status or '—' }}</div>
+  </div>
+  <div class="stat">
+    <div class="label">Video Count</div>
+    <div class="value">{{ batch.manifest.video_count or 0 }}</div>
+  </div>
+  <div class="stat">
+    <div class="label">Ready for Upload</div>
+    <div class="value">{{ 'Yes' if batch.manifest.ready_for_upload else 'No' }}</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Shorts</h2>
+  {% if batch.shorts %}
+    <table>
+      <thead><tr><th>#</th><th>Title</th><th>Hashtags</th></tr></thead>
+      <tbody>
+      {% for s in batch.shorts %}
+        <tr>
+          <td>{{ s.short_index }}</td>
+          <td>{{ s.title }}</td>
+          <td class="muted">{{ s.hashtags|join(' ') }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">No upload metadata found for this batch.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Viral Scores (pre-publish, logged at production time)</h2>
+  {% if batch.viral_scores %}
+    <table>
+      <thead><tr><th>Short ID</th><th>Viral Score</th><th>CTR</th><th>Retention (30s)</th></tr></thead>
+      <tbody>
+      {% for v in batch.viral_scores %}
+        <tr>
+          <td>{{ v.short_id }}</td>
+          <td>{{ '%.2f'|format(v.viral_score) if v.viral_score is not none else '—' }}</td>
+          <td>{{ v.ctr if v.ctr is not none else '—' }}</td>
+          <td>{{ v.retention_30s if v.retention_30s is not none else '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted">CTR/retention are only populated once Analytics &amp; Feedback's 48h/7d checks have run against a published video.</p>
+  {% else %}
+    <div class="empty-state">No hook usage logged for this batch.</div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ name }}{% endblock %}
+{% block content %}
+<h1>{{ name }}</h1>
+<p><a href="{{ url_for('settings_page') }}">&larr; back to settings</a></p>
+
+<div class="card">
+  <form method="post" action="{{ url_for('save_prompt_route', name=name) }}">
+    <textarea name="content" rows="30" spellcheck="false">{{ content }}</textarea>
+    <div style="margin-top: 12px;">
+      <button type="submit">Save {{ name }}</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

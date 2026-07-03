@@ -13,6 +13,8 @@ import base64
 
 from anthropic import Anthropic
 
+from core.cost_tracker import log_anthropic_usage
+
 logger = logging.getLogger(__name__)
 
 THUMBNAIL_PROMPT_GUIDANCE_PATH = Path('./prompts/thumbnail_prompt.txt')
@@ -91,6 +93,7 @@ Return ONLY valid JSON, no markdown."""
                 max_tokens=800,
                 messages=[{"role": "user", "content": prompt}]
             )
+            log_anthropic_usage('thumbnail', response)
 
             response_text = response.content[0].text
 

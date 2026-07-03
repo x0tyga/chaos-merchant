@@ -8,6 +8,8 @@ import logging
 from datetime import datetime
 from anthropic import Anthropic
 
+from core.cost_tracker import log_anthropic_usage
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,9 +71,10 @@ Output ONLY valid JSON."""
                     {"role": "user", "content": prompt}
                 ]
             )
-            
+            log_anthropic_usage('seo_optimizer', response)
+
             response_text = response.content[0].text
-            
+
             # Extract JSON
             try:
                 start_idx = response_text.find('{')

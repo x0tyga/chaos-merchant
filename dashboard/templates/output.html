@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Output{% endblock %}
+{% block content %}
+<h1>Output Batches</h1>
+
+<div class="card">
+  {% if batches %}
+    <table>
+      <thead><tr><th>Batch</th><th>Created</th><th>QC Status</th><th>Videos</th><th>Ready for Upload</th></tr></thead>
+      <tbody>
+      {% for b in batches %}
+        <tr>
+          <td><a href="{{ url_for('output_detail', folder=b.folder) }}">{{ b.batch_id }}</a></td>
+          <td class="muted">{{ b.created_at or '—' }}</td>
+          <td>
+            {% if b.status == 'pass' %}<span class="badge badge-ok">{{ b.status }}</span>
+            {% elif b.status == 'warning' %}<span class="badge badge-warn">{{ b.status }}</span>
+            {% elif b.status == 'error' %}<span class="badge badge-err">{{ b.status }}</span>
+            {% else %}<span class="badge badge-off">{{ b.status }}</span>{% endif %}
+          </td>
+          <td>{{ b.video_count }}</td>
+          <td>
+            {% if b.ready_for_upload %}<span class="badge badge-ok">yes</span>
+            {% else %}<span class="badge badge-off">no</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">No batches produced yet - run the pipeline on a source video to see output here.</div>
+  {% endif %}
+</div>
+{% endblock %}

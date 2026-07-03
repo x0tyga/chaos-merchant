@@ -49,6 +49,8 @@ except ImportError:
 
 from anthropic import Anthropic
 
+from core.cost_tracker import log_anthropic_usage
+
 TRENDING_SEARCH_QUERY = os.getenv('THUMBNAIL_RESEARCH_QUERY', 'gaming shorts')
 TRENDING_SAMPLE_SIZE = 50
 MIN_OWN_DATA_POINTS = 5  # minimum own CTR samples before cross-referencing is meaningful
@@ -225,6 +227,7 @@ Output ONLY valid JSON."""
                 max_tokens=800,
                 messages=[{"role": "user", "content": prompt}]
             )
+            log_anthropic_usage('thumbnail_research', response)
             text = response.content[0].text
             start_idx = text.find('{')
             end_idx = text.rfind('}') + 1

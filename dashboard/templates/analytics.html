@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Analytics{% endblock %}
+{% block content %}
+<h1>Analytics</h1>
+
+<div class="card">
+  <h2>Views / CTR / Retention Over Time</h2>
+  {% if performance_log %}
+    <canvas id="perfChart" height="90"></canvas>
+  {% else %}
+    <div class="empty-state">No performance data logged yet - Analytics &amp; Feedback populates this after a short's first 48h check.</div>
+  {% endif %}
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <h2>Top Performing Hooks</h2>
+    {% if top_hooks %}
+      <table>
+        <thead><tr><th>Hook</th><th>Style</th><th>Uses</th><th>CTR</th><th>Retention</th><th>Status</th></tr></thead>
+        <tbody>
+        {% for h in top_hooks %}
+          <tr>
+            <td>{{ h.text[:60] }}</td>
+            <td class="muted">{{ h.style }}</td>
+            <td>{{ h.usage_count }}</td>
+            <td>{{ '%.1f%%'|format(h.ctr * 100) }}</td>
+            <td>{{ '%.1f%%'|format(h.retention * 100) }}</td>
+            <td>
+              {% if h.status == 'proven_winner' %}<span class="badge badge-ok">{{ h.status }}</span>
+              {% elif h.status == 'declining' %}<span class="badge badge-err">{{ h.status }}</span>
+              {% else %}<span class="badge badge-off">{{ h.status }}</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">No hooks logged yet.</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Recent Shorts</h2>
+    {% if recent_shorts %}
+      <table>
+        <thead><tr><th>Title</th><th>Views</th><th>CTR</th><th>Published</th></tr></thead>
+        <tbody>
+        {% for s in recent_shorts %}
+          <tr>
+            <td>{{ s.title[:50] }}</td>
+            <td>{{ s.views }}</td>
+            <td>{{ '%.1f%%'|format(s.ctr * 100) if s.ctr else '—' }}</td>
+            <td class="muted">{{ s.publish_date or '—' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">No shorts produced yet.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Estimated API Cost (30d)</h2>
+  <div class="grid grid-3">
+    <div class="stat"><div class="label">Total Cost</div><div class="value">${{ '%.2f'|format(cost.total_cost_usd) }}</div></div>
+    <div class="stat"><div class="label">Total Calls</div><div class="value">{{ cost.total_calls }}</div></div>
+    <div class="stat"><div class="label">Agents</div><div class="value">{{ cost.by_agent|length }}</div></div>
+  </div>
+  {% if cost.by_agent %}
+    <table>
+      <thead><tr><th>Agent</th><th>Cost</th></tr></thead>
+      <tbody>
+      {% for agent, c in cost.by_agent.items() %}
+        <tr><td>{{ agent }}</td><td>${{ '%.4f'|format(c) }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>
+
+{% if performance_log %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+  const rows = {{ performance_log|tojson }};
+  const labels = rows.map(r => r.logged_at ? r.logged_at.slice(0, 10) : '');
+  const views = rows.map(r => parseInt(r.views) || 0);
+  const ctr = rows.map(r => (parseFloat(r.thumbnail_ctr) || 0) * 100);
+  const retention = rows.map(r => (parseFloat(r.average_view_percentage) || 0) * 100);
+
+  new Chart(document.getElementById('perfChart'), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'Views', data: views, borderColor: '#4fd1c5', yAxisID: 'y', tension: 0.2 },
+        { label: 'CTR %', data: ctr, borderColor: '#ff5c38', yAxisID: 'y1', tension: 0.2 },
+        { label: 'Retention %', data: retention, borderColor: '#f5c542', yAxisID: 'y1', tension: 0.2 }
+      ]
+    },
+    options: {
+      scales: {
+        y: { type: 'linear', position: 'left', title: { display: true, text: 'Views' } },
+        y1: { type: 'linear', position: 'right', title: { display: true, text: '%' }, grid: { drawOnChartArea: false } }
+      }
+    }
+  });
+</script>
+{% endif %}
+{% endblock %}

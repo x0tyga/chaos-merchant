@@ -18,6 +18,8 @@ try:
 except ImportError:
     raise ImportError("anthropic SDK required: pip install anthropic")
 
+from core.cost_tracker import log_anthropic_usage
+
 try:
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
@@ -248,6 +250,7 @@ ANGLE 2: [different gaming niche angle]
 ANGLE 3: [internet culture or speedrun angle]"""
                 }]
             )
+            log_anthropic_usage('competitor_monitor', response)
 
             return response.content[0].text
         except Exception as e:

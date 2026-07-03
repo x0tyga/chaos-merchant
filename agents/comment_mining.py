@@ -23,6 +23,8 @@ from typing import Dict, List
 
 from anthropic import Anthropic
 
+from core.cost_tracker import log_anthropic_usage
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -121,6 +123,7 @@ Output ONLY valid JSON."""
                 max_tokens=1200,
                 messages=[{"role": "user", "content": prompt}]
             )
+            log_anthropic_usage('comment_mining', response)
             text = response.content[0].text
             start_idx = text.find('{')
             end_idx = text.rfind('}') + 1

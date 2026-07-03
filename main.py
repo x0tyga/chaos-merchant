@@ -9,16 +9,28 @@ import sys
 import logging
 import shutil
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
+# Configure logging - stdout (as before) plus a rotating file under
+# LOG_DIR so the dashboard's Logs page has something real to tail. 10MB x 5
+# backups is generous for text logs and self-limiting so it can never fill
+# a disk unattended on a machine that runs for months.
+LOG_DIR = Path(os.getenv('LOG_DIR', './logs'))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format=LOG_FORMAT,
+    handlers=[
+        logging.StreamHandler(),
+        RotatingFileHandler(LOG_DIR / 'chaos_merchant.log', maxBytes=10_000_000, backupCount=5)
+    ]
 )
 logger = logging.getLogger(__name__)
 

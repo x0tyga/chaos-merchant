@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+{% block content %}
+<h1>Pipeline Status</h1>
+
+<div class="grid grid-3">
+  <div class="stat">
+    <div class="label">Input Queue</div>
+    <div class="value">{{ queue|length }}</div>
+  </div>
+  <div class="stat">
+    <div class="label">Recoverable Checkpoints</div>
+    <div class="value">{{ checkpoints|length }}</div>
+  </div>
+  <div class="stat">
+    <div class="label">YouTube Quota Used</div>
+    <div class="value">{{ quota.quota_percent_used }}%</div>
+  </div>
+  <div class="stat">
+    <div class="label">Est. API Cost (7d)</div>
+    <div class="value">${{ '%.2f'|format(cost.total_cost_usd) }}</div>
+  </div>
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <h2>Input Queue</h2>
+    {% if queue %}
+      <table>
+        <thead><tr><th>File</th></tr></thead>
+        <tbody>
+        {% for video in queue %}
+          <tr><td>{{ video }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">No videos waiting - the watcher will pick up anything dropped in INPUT_DIR.</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Recoverable Checkpoints</h2>
+    {% if checkpoints %}
+      <table>
+        <thead><tr><th>Video</th><th>Last Step</th></tr></thead>
+        <tbody>
+        {% for cp in checkpoints %}
+          <tr><td>{{ cp.video }}</td><td>{{ cp.step }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">No crashed/in-progress runs - nothing to recover.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Scheduled Jobs</h2>
+  <table>
+    <thead><tr><th>Job</th><th>Schedule</th><th>Last Status</th><th>Last Run</th></tr></thead>
+    <tbody>
+    {% for job in jobs %}
+      <tr>
+        <td>{{ job.name }}</td>
+        <td>{{ job.schedule }}</td>
+        <td>
+          {% if job.status == 'success' %}<span class="badge badge-ok">success</span>
+          {% elif job.status == 'failed' %}<span class="badge badge-err">failed</span>
+          {% elif job.status == 'running' %}<span class="badge badge-warn">running</span>
+          {% else %}<span class="badge badge-off">never run</span>{% endif %}
+        </td>
+        <td class="muted">{{ job.end_time or job.start_time or '—' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <h2>Publisher Status</h2>
+    <table>
+      <thead><tr><th>Platform</th><th>Auto-Post</th></tr></thead>
+      <tbody>
+        <tr><td>YouTube</td><td>{% if publisher_flags.youtube %}<span class="badge badge-ok">enabled</span>{% else %}<span class="badge badge-off">disabled</span>{% endif %}</td></tr>
+        <tr><td>TikTok</td><td>{% if publisher_flags.tiktok %}<span class="badge badge-ok">enabled</span>{% else %}<span class="badge badge-off">disabled</span>{% endif %}</td></tr>
+        <tr><td>Instagram</td><td>{% if publisher_flags.instagram %}<span class="badge badge-ok">enabled</span>{% else %}<span class="badge badge-off">disabled</span>{% endif %}</td></tr>
+      </tbody>
+    </table>
+    <p class="muted">Set AUTO_POST_YOUTUBE / AUTO_POST_TIKTOK / AUTO_POST_INSTAGRAM in <a href="{{ url_for('settings_page') }}">Settings</a> to enable.</p>
+  </div>
+
+  <div class="card">
+    <h2>Recent Batches</h2>
+    {% if recent_batches %}
+      <table>
+        <thead><tr><th>Batch</th><th>Status</th><th>Videos</th></tr></thead>
+        <tbody>
+        {% for b in recent_batches %}
+          <tr>
+            <td><a href="{{ url_for('output_detail', folder=b.folder) }}">{{ b.batch_id }}</a></td>
+            <td>
+              {% if b.status == 'pass' %}<span class="badge badge-ok">{{ b.status }}</span>
+              {% elif b.status == 'warning' %}<span class="badge badge-warn">{{ b.status }}</span>
+              {% elif b.status == 'error' %}<span class="badge badge-err">{{ b.status }}</span>
+              {% else %}<span class="badge badge-off">{{ b.status }}</span>{% endif %}
+            </td>
+            <td>{{ b.video_count }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">No batches produced yet.</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

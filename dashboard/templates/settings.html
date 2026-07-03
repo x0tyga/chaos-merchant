@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+
+<div class="card">
+  <h2>Environment (.env)</h2>
+  <p class="muted">Edited directly - saving backs up the previous version to data/backups/ first. Restart the pipeline/scheduler for changes to take effect.</p>
+  <form method="post" action="{{ url_for('save_env_route') }}">
+    <textarea name="env_content" rows="24" spellcheck="false">{{ env_content }}</textarea>
+    <div style="margin-top: 12px;">
+      <button type="submit">Save .env</button>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Prompt Files</h2>
+  <p class="muted">Tune the system's writing style, SEO approach, and thumbnail direction here - no Terminal required.</p>
+  {% if prompt_files %}
+    <div class="prompt-list">
+      {% for f in prompt_files %}
+        <a href="{{ url_for('edit_prompt_route', name=f.name) }}">
+          {{ f.name }} <span class="muted">({{ f.size_bytes }} bytes, modified {{ f.modified_at[:19] }})</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty-state">No prompt files found in prompts/.</div>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('new_prompt_route') }}" style="margin-top: 16px; display: flex; gap: 8px;">
+    <input type="text" name="new_name" placeholder="new_prompt.txt" style="flex: 1;">
+    <button type="submit" class="secondary">Create New Prompt File</button>
+  </form>
+</div>
+{% endblock %}

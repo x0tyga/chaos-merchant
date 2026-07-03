@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+{% block content %}
+<h1>Logs</h1>
+<p class="muted">Tailing the last 300 lines of logs/chaos_merchant.log, refreshing every 5s. <label><input type="checkbox" id="autoRefresh" checked> auto-refresh</label></p>
+
+{% if lines %}
+  <pre class="log" id="logBox">{{ lines|join('\n') }}</pre>
+{% else %}
+  <div class="empty-state">No log file yet - logs/chaos_merchant.log is created once main.py runs.</div>
+  <pre class="log" id="logBox"></pre>
+{% endif %}
+
+<script>
+  const logBox = document.getElementById('logBox');
+  const checkbox = document.getElementById('autoRefresh');
+
+  async function refreshLogs() {
+    if (!checkbox.checked) return;
+    try {
+      const resp = await fetch("{{ url_for('logs_data') }}");
+      const data = await resp.json();
+      const wasAtBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 20;
+      logBox.textContent = data.lines.join('\n');
+      if (wasAtBottom) logBox.scrollTop = logBox.scrollHeight;
+    } catch (e) { /* transient fetch error, next tick retries */ }
+  }
+
+  logBox.scrollTop = logBox.scrollHeight;
+  setInterval(refreshLogs, 5000);
+</script>
+{% endblock %}

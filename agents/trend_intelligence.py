@@ -18,6 +18,8 @@ try:
 except ImportError:
     raise ImportError("anthropic SDK required: pip install anthropic")
 
+from core.cost_tracker import log_anthropic_usage
+
 try:
     import praw
     PRAW_AVAILABLE = True
@@ -276,6 +278,7 @@ ANGLE 3: [Failed attempt or funny moment angle]
 VIRAL_WINDOW: 24"""
                 }]
             )
+            log_anthropic_usage('trend_intelligence', response)
 
             content = response.content[0].text
             lines = content.strip().split('\n')

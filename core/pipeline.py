@@ -171,6 +171,57 @@ class Pipeline:
 
         logger.info(f"✓ Logged {logged} hook(s) to Hook Library for batch {self.batch_id}")
 
+    def _log_channel_memory(self, seo_manifest, voiceover_results, production_result, thumbnail_result):
+        """
+        Add a channel_shorts row for every short CONFIRMED produced, so
+        ChannelMemory.mark_published() (called later by the Publisher module
+        once a short is actually uploaded) has a real row to match against
+        by title - without this, mark_published()'s title lookup always
+        misses and youtube_id/publish_date never get linked. Only logs
+        shorts in production_result['short_results'] (confirmed produced),
+        same scoping rule as _log_hook_usage.
+        """
+        try:
+            from core.memory import ChannelMemory
+            channel_memory = ChannelMemory(str(self.data_dir / 'chaos_merchant.db'))
+        except Exception as e:
+            logger.warning(f"⚠ Channel memory unavailable, skipping channel memory logging: {e}")
+            return
+
+        per_clip_seo = (seo_manifest or {}).get('per_clip', [])
+        thumbnails = (thumbnail_result or {}).get('thumbnails', [])
+        features_any = production_result.get('metadata', {}).get('features_applied_in_any_short', [])
+        caption_style = 'burned_in' if 'captions' in features_any else 'none'
+
+        logged = 0
+        for short_result in production_result.get('short_results', []):
+            short_number = short_result.get('short_number')
+            if short_number is None or short_number >= len(voiceover_results):
+                continue
+
+            clip_voiceover = voiceover_results[short_number]
+            if clip_voiceover.get('status') != 'success':
+                continue
+
+            seo_for_short = per_clip_seo[short_number] if short_number < len(per_clip_seo) else {}
+            title = seo_for_short.get('best_title') or clip_voiceover.get('script', {}).get('hook', 'Untitled Short')
+            keywords = seo_for_short.get('metadata', {}).get('keywords', [])
+            topic = keywords[0] if keywords else 'general'
+            script_summary = clip_voiceover.get('script', {}).get('main_content', '')[:300]
+            hook_text = clip_voiceover.get('script', {}).get('hook', '')
+
+            thumb_for_short = thumbnails[short_number] if short_number < len(thumbnails) else {}
+            thumbnail_style = thumb_for_short.get('status', 'unknown')
+
+            if channel_memory.add_short(
+                title=title, topic=topic, source_video=str(self.video_path),
+                script_summary=script_summary, hook_text=hook_text,
+                thumbnail_style=thumbnail_style, caption_style=caption_style
+            ):
+                logged += 1
+
+        logger.info(f"✓ Logged {logged} short(s) to Channel Memory for batch {self.batch_id}")
+
     def _load_channel_history(self):
         """
         Load real recently-published topics from Channel Memory (SQLite) to avoid
@@ -373,7 +424,12 @@ class Pipeline:
                 'generated': thumbnail_result.get('generated_count', 0),
                 'brief_only': thumbnail_result.get('brief_only_count', 0)
             })
-            
+
+            self._log_channel_memory(
+                self.step_outputs['seo_optimizer'], self.step_outputs['script_voiceover'],
+                production_result, thumbnail_result
+            )
+
             # Step 6: Quality Control
             logger.info("Step 6/7: Quality Control")
             self.log_step(PipelineStep.QUALITY_CONTROL, 'in_progress')

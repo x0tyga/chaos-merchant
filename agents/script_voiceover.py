@@ -14,6 +14,8 @@ import tempfile
 
 from anthropic import Anthropic
 
+from core.cost_tracker import log_anthropic_usage
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +37,7 @@ class ScriptGenerator:
                 {"role": "user", "content": prompt}
             ]
         )
+        log_anthropic_usage('script_voiceover', response)
 
         response_text = response.content[0].text
 

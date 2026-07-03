@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Trends{% endblock %}
+{% block content %}
+<h1>Trends</h1>
+
+<div class="card">
+  <h2>Today's Brief</h2>
+  {% if brief %}
+    <p class="muted">Generated {{ brief.generated_at }}</p>
+    <table>
+      <thead><tr><th>Trend</th><th>Score</th><th>Viral Window</th><th>Angles</th></tr></thead>
+      <tbody>
+      {% for t in brief.top_trends %}
+        <tr>
+          <td>{{ t.trend }}</td>
+          <td>{{ '%.0f%%'|format(t.composite_score * 100) }}</td>
+          <td>{{ t.viral_window_hours }}h</td>
+          <td class="muted">{{ t.angles|join(' / ') }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if brief.calendar_events %}
+      <p class="muted">Upcoming: {{ brief.calendar_events|join(', ') }}</p>
+    {% endif %}
+  {% else %}
+    <div class="empty-state">No trend brief generated yet - runs daily at 7am, or trigger manually: python -m agents.trend_intelligence</div>
+  {% endif %}
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <h2>Competitor Alerts</h2>
+    {% if alerts %}
+      <table>
+        <thead><tr><th>Channel</th><th>Title</th><th>Views (6h)</th><th>Urgency</th></tr></thead>
+        <tbody>
+        {% for a in alerts|reverse %}
+          <tr>
+            <td>{{ a.channel }}</td>
+            <td>{{ a.title[:40] }}</td>
+            <td>{{ a.views_gained_6h }}</td>
+            <td class="muted">{{ a.urgency }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">No competitor alerts yet.</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Ideas Backlog</h2>
+    {% if ideas %}
+      <table>
+        <thead><tr><th>Idea</th><th>Source</th></tr></thead>
+        <tbody>
+        {% for i in ideas %}
+          <tr><td>{{ i.idea }}</td><td class="muted">{{ i.source }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">No ideas logged yet - Comment Mining populates this weekly.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Competitors</h2>
+  <form method="post" action="{{ url_for('add_competitor_route') }}" style="margin-bottom: 16px; display: flex; gap: 8px;">
+    <input type="text" name="handle_or_url" placeholder="@SomeChannel or https://youtube.com/@SomeChannel" style="flex: 1;">
+    <input type="text" name="category" placeholder="category (default: gaming)" style="width: 160px;">
+    <button type="submit">Add Competitor</button>
+  </form>
+  {% if competitors %}
+    <table>
+      <thead><tr><th>Channel</th><th>Channel ID</th><th>Category</th></tr></thead>
+      <tbody>
+      {% for c in competitors %}
+        <tr><td>{{ c.channel }}</td><td class="muted">{{ c.channel_id }}</td><td>{{ c.category }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">No competitors configured yet - add one by handle or URL above.</div>
+  {% endif %}
+</div>
+{% endblock %}
