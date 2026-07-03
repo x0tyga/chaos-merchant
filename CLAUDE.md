@@ -192,14 +192,14 @@ client = Anthropic()
 
 # For cost-sensitive: Haiku
 response = client.messages.create(
-    model="claude-3-5-haiku-20241022",
+    model="claude-haiku-4-5-20251001",
     messages=[...],
     max_tokens=500
 )
 
 # For creative tasks: Sonnet
 response = client.messages.create(
-    model="claude-3-5-sonnet-20241022",
+    model="claude-sonnet-5",
     messages=[...],
     max_tokens=2000
 )

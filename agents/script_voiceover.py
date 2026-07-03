@@ -54,7 +54,7 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
 
         try:
             response = self.client.messages.create(
-                model="claude-3-5-haiku-20241022",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=500,
                 messages=[
                     {"role": "user", "content": prompt}
@@ -88,7 +88,7 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
             return {
                 'status': 'success',
                 'script': script_data,
-                'model': 'claude-3-5-haiku-20241022'
+                'model': 'claude-haiku-4-5-20251001'
             }
             
         except Exception as e:
