@@ -43,11 +43,11 @@ fi
 
 # Check for Kokoro TTS (not in requirements.txt, installed separately)
 KOKORO_OK=1
-if ! python3 -c "import kokoro" &> /dev/null; then
+if ! python3 -c "import kokoro_onnx" &> /dev/null; then
     KOKORO_OK=0
-    echo "⚠️  kokoro-tts not installed (primary voice engine)"
+    echo "⚠️  kokoro-onnx not installed (primary voice engine)"
 else
-    echo "✓ kokoro-tts found"
+    echo "✓ kokoro-onnx found"
 fi
 
 # Create .env from example FIRST, so we have one source of truth for paths
@@ -139,7 +139,10 @@ fi
 
 if [ "$KOKORO_OK" -eq 0 ]; then
     echo "$STEP. Install Kokoro TTS (REQUIRED unless you're using ElevenLabs only):"
-    echo "     pip install kokoro-tts"
+    echo "     pip install kokoro-onnx"
+    echo "     Then download the model files (kokoro-v1.0.onnx, voices-v1.0.bin)"
+    echo "     from https://github.com/thewh1teagle/kokoro-onnx/releases"
+    echo "     and set KOKORO_MODEL_PATH / KOKORO_VOICES_PATH in .env"
     STEP=$((STEP+1))
     echo ""
 fi

@@ -97,52 +97,71 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
 
 
 class KokoroTTS:
-    """Kokoro TTS voice synthesis (free, local, primary engine)"""
+    """Kokoro TTS voice synthesis (free, local, primary engine).
+
+    Uses the kokoro-onnx package (module name: kokoro_onnx), which requires
+    two model files downloaded separately (not installed via pip):
+    - ONNX model: KOKORO_MODEL_PATH (default: kokoro-v1.0.onnx)
+    - Voices file: KOKORO_VOICES_PATH (default: voices-v1.0.bin)
+    Download from: https://github.com/thewh1teagle/kokoro-onnx/releases
+    """
 
     def __init__(self):
+        self.model_path = os.getenv('KOKORO_MODEL_PATH', 'kokoro-v1.0.onnx')
+        self.voices_path = os.getenv('KOKORO_VOICES_PATH', 'voices-v1.0.bin')
         self.available = self._check_availability()
 
     def _check_availability(self):
-        """Check if Kokoro is available"""
+        """Check if kokoro-onnx is installed and model files exist"""
         try:
-            import kokoro
-            return True
+            import kokoro_onnx  # noqa: F401
         except ImportError:
-            logger.warning("⚠️  Kokoro not installed. Install with: pip install kokoro-tts")
+            logger.warning("⚠️  kokoro-onnx not installed. Install with: pip install kokoro-onnx")
             return False
+
+        if not os.path.exists(self.model_path) or not os.path.exists(self.voices_path):
+            logger.warning(
+                f"⚠️  Kokoro model files not found (KOKORO_MODEL_PATH={self.model_path}, "
+                f"KOKORO_VOICES_PATH={self.voices_path}). Download from "
+                f"https://github.com/thewh1teagle/kokoro-onnx/releases"
+            )
+            return False
+
+        return True
 
     def generate(self, text, voice='bella', output_path=None):
         """
         Generate voiceover using Kokoro TTS
-        
+
         Args:
             text: Text to synthesize
             voice: Voice name (bella, heart, nova, etc)
             output_path: Output WAV file path
-        
+
         Returns:
             dict: Audio file path and metadata
         """
         if not self.available:
             raise RuntimeError("Kokoro TTS not available")
-        
+
         logger.info(f"🎙️  Generating voiceover with Kokoro ({voice})...")
-        
+
         try:
-            import kokoro
-            
+            from kokoro_onnx import Kokoro
+            import soundfile as sf
+
             if output_path is None:
                 output_path = f"/tmp/voiceover_kokoro_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-            
+
             # Generate audio
-            tts = kokoro.Kokoro(voice=voice)
-            audio = tts.synthesize(text)
-            
+            tts = Kokoro(self.model_path, self.voices_path)
+            samples, sample_rate = tts.create(text, voice=voice)
+
             # Save to file
-            tts.save_audio(audio, output_path)
-            
+            sf.write(output_path, samples, sample_rate)
+
             logger.info(f"✓ Kokoro voiceover saved: {output_path}")
-            
+
             return {
                 'status': 'success',
                 'engine': 'kokoro',
@@ -151,7 +170,7 @@ class KokoroTTS:
                 'text_length': len(text),
                 'estimated_duration': len(text) / 150 * 60  # ~150 words per minute
             }
-            
+
         except Exception as e:
             logger.error(f"❌ Kokoro TTS failed: {e}")
             raise
@@ -308,7 +327,7 @@ def generate_voiceover(clip_data, trending_topics=None, channel_history=None):
         else:
             raise RuntimeError(
                 "❌ No voiceover engine available\n"
-                "Install Kokoro with: pip install kokoro-tts\n"
+                "Install Kokoro with: pip install kokoro-onnx (and download the model files, see KokoroTTS docstring)\n"
                 "Or configure ElevenLabs: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env"
             )
 

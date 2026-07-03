@@ -46,10 +46,10 @@ def main():
     # Check environment
     kokoro_available = True
     try:
-        import kokoro
+        import kokoro_onnx
     except ImportError:
-        logger.warning("⚠️  Kokoro not installed")
-        logger.warning("   Install with: pip install kokoro-tts")
+        logger.warning("⚠️  kokoro-onnx not installed")
+        logger.warning("   Install with: pip install kokoro-onnx")
         kokoro_available = False
     
     elevenlabs_available = bool(os.getenv('ELEVENLABS_API_KEY') and os.getenv('ELEVENLABS_VOICE_ID'))
