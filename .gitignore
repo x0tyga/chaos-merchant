@@ -39,7 +39,16 @@ env/
 
 # Data and processing
 data/chaos_merchant.db
+data/chaos_merchant.db-wal
+data/chaos_merchant.db-shm
 data/backups/
+data/job_tracker.json
+data/quota_tracker.json
+data/checkpoints/
+data/trend_intelligence_latest.json
+data/competitor_alerts_latest.json
+data/competitor_alerts_history.json
+data/voice_tests/
 input/*
 output/*
 *.log
