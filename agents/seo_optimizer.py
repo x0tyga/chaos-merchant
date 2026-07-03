@@ -6,11 +6,56 @@ Generates titles, descriptions, hashtags, keywords, and tags
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from anthropic import Anthropic
 
 from core.cost_tracker import log_anthropic_usage
 
 logger = logging.getLogger(__name__)
+
+SEO_PROMPT_PATH = Path('./prompts/seo_optimization.txt')
+
+DEFAULT_SEO_INSTRUCTIONS = """This channel covers chaotic, high-energy viral moments across ANY topic -
+gaming, golf, sports, internet culture, unexpected/unhinged moments -
+not just gaming. GTA6 is the current primary focus given its release
+timing, but match the vernacular and hashtags to whatever this specific
+clip's content actually is.
+
+TITLE APPROACH (SPECIFIC & CONTENT-FOCUSED, 40-55 characters ideal):
+- AVOID generic clickbait ("YOU WON'T BELIEVE THIS", "INSANE MOMENT")
+- Name the actual subject (game/sport/topic) and the specific moment/detail
+- Each title must be UNIQUE to this specific clip
+- Example (good): "GOLFER SNAPS DRIVER AFTER TRIPLE BOGEY"
+- Example (avoid): "INSANE MOMENT" (too generic, no topic signal)
+
+Focus on:
+- Vernacular that matches the clip's actual topic (gaming slang for
+  gaming content, sports/golf terminology for sports content, etc.)
+- CTR optimization (curiosity, urgency)
+- Trending keyword integration
+- Hook-first messaging
+- Hashtags: mix specific (#GolfFail, #GameGlitch) with broad (#Viral,
+  #Shorts) matched to the clip's actual topic"""
+
+
+def _load_seo_instructions() -> str:
+    """
+    Reads tone/style/focus instructions from prompts/seo_optimization.txt
+    if present - this is what the dashboard's Settings page edits to tune
+    generated metadata without touching code. Falls back to
+    DEFAULT_SEO_INSTRUCTIONS if the file is missing or empty. The required
+    JSON output schema is always defined in code, never read from this
+    file, so an edit here can change tone/vocabulary/focus but can never
+    break JSON parsing downstream.
+    """
+    try:
+        if SEO_PROMPT_PATH.exists():
+            content = SEO_PROMPT_PATH.read_text().strip()
+            if content:
+                return content
+    except Exception as e:
+        logger.warning(f"⚠ Could not read SEO prompt template: {e}")
+    return DEFAULT_SEO_INSTRUCTIONS
 
 
 class SEOOptimizer:
@@ -40,7 +85,8 @@ class SEOOptimizer:
         cta = script.get('cta', '')
         
         clip_summary = f"Hook: {hook}. Content: {main_content}"
-        
+        instructions = _load_seo_instructions()
+
         prompt = f"""Generate YouTube Shorts SEO metadata.
 
 Video Content:
@@ -55,18 +101,7 @@ Generate a JSON object with:
 - keywords: list of 10 search keywords
 - tags: list of 5-8 video tags
 
-This channel covers chaotic, high-energy viral moments across ANY topic -
-gaming, golf, sports, internet culture, unexpected/unhinged moments -
-not just gaming. GTA6 is the current primary focus given its release
-timing, but match the vernacular and hashtags to whatever this specific
-clip's content actually is.
-
-Focus on:
-- Vernacular that matches the clip's actual topic (gaming slang for
-  gaming content, sports/golf terminology for sports content, etc.)
-- CTR optimization (curiosity, urgency)
-- Trending keyword integration
-- Hook-first messaging
+{instructions}
 
 Output ONLY valid JSON."""
 

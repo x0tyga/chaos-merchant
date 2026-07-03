@@ -19,6 +19,52 @@ from core.cost_tracker import log_anthropic_usage
 
 logger = logging.getLogger(__name__)
 
+SCRIPT_PROMPT_PATH = Path('./prompts/script_generation.txt')
+
+DEFAULT_SCRIPT_INSTRUCTIONS = """Generate a YouTube Shorts voiceover script for ONE specific clip
+taken from a longer source video. Write about what's happening in THIS
+clip specifically, not the source video as a whole.
+
+This channel covers chaotic, high-energy viral moments across ANY topic -
+gaming, golf, sports, internet culture, unexpected/unhinged moments - not
+just gaming. GTA6 is the current primary focus given its release timing,
+but write for whatever this specific clip is actually about.
+
+RULES:
+1. Hook first (0-3 seconds) - MUST grab attention immediately
+2. Main content (3-30 seconds) - explain the clip, build tension
+3. Call-to-action (30-45 seconds) - subscribe/like/comment
+4. Total words: 120-180 words (reads at ~150 wpm = 48-72 seconds)
+
+TONE:
+- High energy, enthusiastic, a little unhinged
+- Vernacular matched to the clip's actual topic (gaming slang for gaming
+  content, sports/golf terminology for sports content, etc.)
+- Short sentences, punchy delivery
+- Emphasize surprise, humor, chaos, and skill/skill-fail moments"""
+
+
+def _load_script_instructions() -> str:
+    """
+    Reads tone/style/rules instructions from prompts/script_generation.txt
+    if present - this is what the dashboard's Settings page edits to tune
+    generated scripts without touching code. Falls back to
+    DEFAULT_SCRIPT_INSTRUCTIONS if the file is missing or empty, so a
+    fresh install (or an accidentally-emptied file) never breaks script
+    generation. Per-clip data and the required JSON output schema are
+    always appended in code afterward, never read from this file - an
+    edit here can change tone/rules/vocabulary but can never break JSON
+    parsing downstream by deleting the wrong line.
+    """
+    try:
+        if SCRIPT_PROMPT_PATH.exists():
+            content = SCRIPT_PROMPT_PATH.read_text().strip()
+            if content:
+                return content
+    except Exception as e:
+        logger.warning(f"⚠ Could not read script prompt template: {e}")
+    return DEFAULT_SCRIPT_INSTRUCTIONS
+
 
 class ScriptGenerator:
     """Generates YouTube Shorts scripts using Claude API"""
@@ -126,14 +172,8 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
         """
         logger.info(f"📝 Generating script for clip {clip_index + 1}...")
 
-        prompt = f"""Generate a YouTube Shorts voiceover script for ONE specific clip
-taken from a longer source video. Write about what's happening in THIS
-clip specifically, not the source video as a whole.
-
-This channel covers chaotic, high-energy viral moments across ANY topic -
-gaming, golf, sports, internet culture, unexpected/unhinged moments - not
-just gaming. GTA6 is the current primary focus given its release timing,
-but write for whatever this specific clip is actually about.
+        instructions = _load_script_instructions()
+        prompt = f"""{instructions}
 
 Clip data:
 - Clip #{clip_index + 1}

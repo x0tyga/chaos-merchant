@@ -175,12 +175,20 @@ tiktok_trends = fetch_tiktok_trends()
 all_trends.extend(tiktok_trends['trends'])
 ```
 
-### Modifying Script Generation Prompt
+### Modifying Script Generation / SEO Metadata Prompts
 
-1. Edit `prompts/script_generation.txt`
-2. Variables available: `{clip_topic}`, `{trending_hooks}`, `{channel_memory}`
-3. Test with small video in `tests/sample_video.mp4`
-4. The agent automatically validates length and timing
+`prompts/script_generation.txt` and `prompts/seo_optimization.txt` are
+genuinely live - `agents/script_voiceover.py`'s `_load_script_instructions()`
+and `agents/seo_optimizer.py`'s `_load_seo_instructions()` read them at
+generation time (falling back to a hardcoded default if the file is
+missing/empty) and splice the content directly into the prompt sent to
+Claude. No `{template_variables}` - it's inserted as plain instructional
+text (tone, rules, focus areas), while the actual per-clip data and the
+required JSON output schema stay code-controlled so an edit here can
+never break JSON parsing downstream. Edit either file directly, or via
+the dashboard's Settings page - takes effect on the next script/SEO call,
+no restart needed. `agents/thumbnail.py` reads `prompts/thumbnail_prompt.txt`
+the same way, as supplementary guidance folded into its own prompt.
 
 ### Adding a New LLM Model (e.g., Sonnet for specific task)
 
