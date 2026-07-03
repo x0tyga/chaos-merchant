@@ -110,6 +110,54 @@ class YouTubeCompetitorFetcher:
             logger.warning(f"⚠ Could not fetch stats for {video_id}: {e}")
             return None
 
+    def resolve_channel_id(self, handle_or_url: str) -> Optional[Dict]:
+        """
+        Resolve a YouTube handle (@name) or channel URL to a real
+        channel_id + display name via the Data API, so competitors can be
+        added by URL instead of hand-typing channel IDs.
+
+        Accepts:
+        - '@SomeHandle' or 'SomeHandle'
+        - 'https://www.youtube.com/@SomeHandle'
+        - 'https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx'
+        """
+        if not self.youtube:
+            logger.error("❌ YouTube API not available - cannot resolve channel")
+            return None
+
+        raw = handle_or_url.strip()
+
+        # Direct channel ID URL - no handle resolution needed, just verify it exists
+        if '/channel/' in raw:
+            channel_id = raw.split('/channel/')[-1].split('/')[0].split('?')[0]
+            try:
+                response = self.youtube.channels().list(part='snippet', id=channel_id).execute()
+                items = response.get('items', [])
+                if items:
+                    return {'channel_id': channel_id, 'channel': items[0]['snippet']['title']}
+                logger.error(f"❌ No channel found for ID: {channel_id}")
+                return None
+            except HttpError as e:
+                logger.error(f"❌ Could not resolve channel ID {channel_id}: {e}")
+                return None
+
+        # Extract handle from a /@handle URL, or treat the whole input as a handle
+        if '/@' in raw:
+            handle = '@' + raw.split('/@')[-1].split('/')[0].split('?')[0]
+        else:
+            handle = '@' + raw.lstrip('@')
+
+        try:
+            response = self.youtube.channels().list(part='id,snippet', forHandle=handle).execute()
+            items = response.get('items', [])
+            if not items:
+                logger.error(f"❌ No channel found for handle: {handle}")
+                return None
+            return {'channel_id': items[0]['id'], 'channel': items[0]['snippet']['title']}
+        except HttpError as e:
+            logger.error(f"❌ Could not resolve handle {handle}: {e}")
+            return None
+
 
 class CompetitorAlert:
     """Generates high-quality competitor alerts with analysis"""
@@ -252,17 +300,20 @@ class CompetitorMonitor:
         """Initialize competitors config"""
         if not self.config_path.exists():
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            # Empty by default - a placeholder channel_id like 'UC_example1'
+            # isn't a real channel, so seeding it just produces "channel not
+            # found" warnings and silently drives check_competitors() into
+            # its fallback path. Add real competitors with:
+            #   python -m agents.competitor_monitor add @SomeChannel
             config = {
-                'competitors': [
-                    {'channel': 'ExampleGaming1', 'channel_id': 'UC_example1', 'category': 'gaming'},
-                    {'channel': 'ExampleGaming2', 'channel_id': 'UC_example2', 'category': 'gaming'},
-                ],
+                'competitors': [],
                 'check_interval_hours': 3,
                 'alert_threshold_views_6h': self.ALERT_THRESHOLD
             }
             with open(self.config_path, 'w') as f:
                 json.dump(config, f, indent=2)
-            logger.info(f"✓ Competitor config template created: {self.config_path}")
+            logger.info(f"✓ Competitor config template created (empty): {self.config_path}")
+            logger.info("  Add competitors with: python -m agents.competitor_monitor add @SomeChannel")
 
     def load_competitors(self) -> List[Dict]:
         """Load competitor list from config"""
@@ -273,6 +324,37 @@ class CompetitorMonitor:
         except Exception as e:
             logger.error(f"Failed to load competitors: {e}")
             return []
+
+    def add_competitor(self, handle_or_url: str, category: str = 'gaming') -> Optional[Dict]:
+        """
+        Resolve a YouTube handle/URL to a real channel_id via the Data API
+        and append it to config/competitors.json. Returns the added
+        competitor dict, or None if resolution failed (bad handle, API
+        unavailable, etc).
+        """
+        resolved = self.youtube_fetcher.resolve_channel_id(handle_or_url)
+        if not resolved:
+            return None
+
+        competitors = self.load_competitors()
+        if any(c.get('channel_id') == resolved['channel_id'] for c in competitors):
+            logger.info(f"ℹ {resolved['channel']} is already in competitors.json")
+            return resolved
+
+        competitors.append({
+            'channel': resolved['channel'],
+            'channel_id': resolved['channel_id'],
+            'category': category
+        })
+
+        with open(self.config_path, 'r') as f:
+            config = json.load(f)
+        config['competitors'] = competitors
+        with open(self.config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+
+        logger.info(f"✓ Added competitor: {resolved['channel']} ({resolved['channel_id']}, category: {category})")
+        return resolved
 
     def check_competitors(self, channel_memory_recent_topics: List[str] = None) -> Dict:
         """
@@ -291,56 +373,51 @@ class CompetitorMonitor:
 
         alerts = []
 
-        # Fetch real videos from YouTube API, or use fallback mock if API unavailable
+        # No fallback mock data - if the API is unavailable, that's a real
+        # problem worth surfacing distinctly rather than masking it with
+        # fake-looking alerts that could get acted on as if they were real.
+        if not self.youtube_fetcher.youtube:
+            logger.error("❌ YouTube API not available (missing/invalid YOUTUBE_API_KEY) - cannot check competitors")
+            return {
+                'status': 'api_unavailable',
+                'competitors_checked': len(competitors),
+                'alerts_triggered': 0,
+                'alerts': [],
+                'next_check': (datetime.now() + timedelta(hours=3)).isoformat(),
+                'timestamp': datetime.now().isoformat()
+            }
+
         viral_videos = []
+        for competitor in competitors:
+            channel_id = competitor.get('channel_id', '')
+            channel_name = competitor.get('channel', '')
 
-        # Try to fetch real competitor data
-        if self.youtube_fetcher.youtube:
-            for competitor in competitors:
-                channel_id = competitor.get('channel_id', '')
-                channel_name = competitor.get('channel', '')
+            # Get recent uploads
+            recent_videos = self.youtube_fetcher.get_channel_recent_uploads(channel_id, max_results=5)
 
-                # Get recent uploads
-                recent_videos = self.youtube_fetcher.get_channel_recent_uploads(channel_id, max_results=5)
+            for video in recent_videos:
+                # Get current view count
+                stats = self.youtube_fetcher.get_video_stats(video['video_id'])
+                if stats:
+                    # Calculate approximate views gained (proxy: view count / time since upload)
+                    published_at = datetime.fromisoformat(video['published_at'].replace('Z', '+00:00'))
+                    hours_since_upload = (datetime.now(published_at.tzinfo) - published_at).total_seconds() / 3600
+                    if hours_since_upload > 0.5:  # Only if video is at least 30 min old
+                        views_gained = int(stats['views'] / max(hours_since_upload, 1))
+                        viral_videos.append({
+                            'channel': channel_name,
+                            'title': video['title'],
+                            'video_id': video['video_id'],
+                            'views_gained': views_gained,
+                            'category': competitor.get('category', 'gaming')
+                        })
 
-                for video in recent_videos:
-                    # Get current view count
-                    stats = self.youtube_fetcher.get_video_stats(video['video_id'])
-                    if stats:
-                        # Calculate approximate views gained (proxy: view count / time since upload)
-                        published_at = datetime.fromisoformat(video['published_at'].replace('Z', '+00:00'))
-                        hours_since_upload = (datetime.now(published_at.tzinfo) - published_at).total_seconds() / 3600
-                        if hours_since_upload > 0.5:  # Only if video is at least 30 min old
-                            views_gained = int(stats['views'] / max(hours_since_upload, 1))
-                            viral_videos.append({
-                                'channel': channel_name,
-                                'title': video['title'],
-                                'video_id': video['video_id'],
-                                'views_gained': views_gained,
-                                'category': competitor.get('category', 'gaming')
-                            })
-
+        if viral_videos:
             logger.info(f"✓ Fetched {len(viral_videos)} videos from {len(competitors)} competitors")
-
-        # Fallback to mock data if API unavailable
-        if not viral_videos:
-            logger.info("ℹ YouTube API unavailable, using fallback mock data")
-            viral_videos = [
-                {
-                    'channel': 'ExampleGaming1',
-                    'title': 'GTA6 NEW EXPLOIT BREAKS EVERYTHING',
-                    'video_id': 'mock_viral_001',
-                    'views_gained': 25000,
-                    'category': 'glitch'
-                },
-                {
-                    'channel': 'ExampleGaming2',
-                    'title': 'Speedrunner finds impossible skip',
-                    'video_id': 'mock_viral_002',
-                    'views_gained': 8000,
-                    'category': 'speedrun'
-                }
-            ]
+        else:
+            logger.info("ℹ No videos found for configured competitors - check that channel_id values in "
+                        "config/competitors.json are valid (add real ones with: "
+                        "python -m agents.competitor_monitor add @SomeChannel)")
 
         for video in viral_videos:
             views_gained = video['views_gained']
@@ -409,3 +486,35 @@ def monitor_competitors_3h(channel_memory_recent_topics: List[str] = None, quota
         logger.info(f"✓ Alerts saved: {alerts_path}")
 
     return result
+
+
+if __name__ == "__main__":
+    import sys
+    import argparse
+
+    logging.basicConfig(level=logging.INFO)
+
+    parser = argparse.ArgumentParser(description="Competitor Monitor CLI")
+    subparsers = parser.add_subparsers(dest='command')
+
+    add_parser = subparsers.add_parser('add', help='Add a competitor by YouTube handle or URL')
+    add_parser.add_argument('handle_or_url', help='e.g. @SomeChannel or https://youtube.com/@SomeChannel')
+    add_parser.add_argument('--category', default='gaming', help='Competitor category (default: gaming)')
+
+    subparsers.add_parser('list', help='List configured competitors')
+
+    args = parser.parse_args()
+
+    if args.command == 'add':
+        monitor = CompetitorMonitor()
+        result = monitor.add_competitor(args.handle_or_url, args.category)
+        sys.exit(0 if result else 1)
+    elif args.command == 'list':
+        monitor = CompetitorMonitor()
+        competitors = monitor.load_competitors()
+        if not competitors:
+            print("No competitors configured. Add one with: python -m agents.competitor_monitor add @SomeChannel")
+        for c in competitors:
+            print(f"  {c.get('channel')} ({c.get('channel_id')}) - {c.get('category')}")
+    else:
+        parser.print_help()
