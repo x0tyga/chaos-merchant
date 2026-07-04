@@ -586,7 +586,12 @@ class Pipeline:
             }
             
         except Exception as e:
-            logger.error(f"❌ Pipeline failed: {e}")
+            # Full traceback, not just str(e) - this is the top-level catch
+            # for the whole pipeline run, including Video Production (Step
+            # 4), where a corrupt/interrupted ffmpeg export previously
+            # surfaced here as a bare one-line message with no indication
+            # of which step or which underlying call actually failed.
+            logger.exception("❌ Pipeline failed")
             self.processing_log['status'] = 'failed'
             self.processing_log['error'] = str(e)
             raise

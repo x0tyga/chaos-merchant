@@ -401,31 +401,76 @@ class VideoExporter:
 
     @staticmethod
     def export_mp4(video_clip: VideoFileClip, output_path: str, preset: str = 'ultrafast') -> str:
-        """Export VideoClip to MP4"""
+        """
+        Export VideoClip to MP4.
+
+        Writes to a temporary path first and only moves it to the real
+        output_path once write_videofile() has fully completed - moviepy
+        shells out to ffmpeg as a subprocess and writes directly to its
+        destination path with no atomicity guarantee, so a crash, an OOM
+        kill, or any exception partway through the encode previously left
+        a truncated file sitting AT the real output_path. A truncated MP4
+        is missing its moov atom (written last by ffmpeg by default) and
+        fails with "moov atom not found" on every later read (ffprobe,
+        moviepy, QC's VideoValidator, the Pipeline Auditor's audio-level
+        check) - this makes that failure mode structurally impossible:
+        output_path either doesn't exist yet, or contains a fully-written,
+        valid file. Never something in between.
+        """
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = output_path.with_name(f".{output_path.name}.tmp")
+
+        # A stale temp file from a previous crashed run must never be
+        # mistaken for this run's output, and some ffmpeg configurations
+        # refuse to silently overwrite an existing file.
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError as e:
+                logger.warning(f"⚠ Could not remove stale temp file {temp_path}: {e}")
 
         try:
             logger.info(f"📹 Exporting to {output_path.name} (preset: {preset})...")
 
             video_clip.write_videofile(
-                str(output_path),
+                str(temp_path),
                 codec='libx264',
                 audio_codec='aac',
                 fps=30,
                 logger=None,
                 preset=preset,
                 bitrate='6000k',
-                audio_bitrate='128k'
+                audio_bitrate='128k',
+                ffmpeg_params=['-movflags', 'faststart']
             )
+
+            if not temp_path.exists() or temp_path.stat().st_size == 0:
+                raise IOError(f"write_videofile() returned without error but produced no output file: {temp_path}")
+
+            # Rename within the same directory/filesystem - atomic, so
+            # output_path can never be observed in a partially-written state.
+            temp_path.replace(output_path)
 
             file_size_mb = output_path.stat().st_size / (1024 * 1024)
             logger.info(f"✓ Exported: {output_path.name} ({file_size_mb:.1f} MB)")
             return str(output_path)
 
-        except Exception as e:
-            logger.error(f"❌ Export failed: {e}")
+        except Exception:
+            logger.exception(f"❌ Export failed for {output_path.name}")
             raise
+        finally:
+            # Whatever happened above, a leftover temp file must never
+            # survive: it's either already been moved to output_path (the
+            # success path, so this is a no-op) or it's a partial/corrupt
+            # write that must not be left on disk to be mistaken for real
+            # output by a later run or a manual directory listing.
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                    logger.info(f"🧹 Cleaned up incomplete temp export: {temp_path.name}")
+                except OSError as cleanup_error:
+                    logger.warning(f"⚠ Could not clean up temp file {temp_path}: {cleanup_error}")
 
     @staticmethod
     def validate_output(mp4_path: str) -> bool:

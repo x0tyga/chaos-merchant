@@ -120,13 +120,25 @@ def verify_environment():
 
 
 def on_new_video(video_path):
-    """Callback function when new video is detected"""
+    """
+    Callback function when new video is detected. One video's failure must
+    not crash the watcher/scheduler process (other videos still need to be
+    processed, the scheduler still needs to run), so the exception is
+    caught here rather than left to propagate - but it must be logged with
+    a full traceback. This was previously the actual point where a Video
+    Production crash (e.g. an interrupted ffmpeg export) died silently:
+    core/pipeline.py's run() does re-raise on failure, but this was the
+    last catch in the chain, and it only logged str(e) with no traceback
+    and no re-raise - so a real production crash left nothing in the logs
+    beyond a single vague line, and the watcher loop carried on as if
+    nothing had happened.
+    """
     logger.info(f"🚀 Processing video: {video_path}")
     try:
         result = run_pipeline(video_path)
         logger.info(f"✅ Video processed: {result['status']}")
-    except Exception as e:
-        logger.error(f"❌ Error processing video: {e}")
+    except Exception:
+        logger.exception(f"❌ Error processing video: {video_path}")
 
 
 def main():
