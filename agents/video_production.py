@@ -48,10 +48,14 @@ class ClipExtractor:
         """Extract segment from source video"""
         try:
             clip = self.video_clip.subclipped(start_time, end_time)
-            logger.info(f"✓ Extracted clip: {start_time:.1f}s - {end_time:.1f}s ({clip.duration:.1f}s)")
+            expected_frames = int(clip.duration * self.fps)
+            logger.info(
+                f"✓ Extracted clip: {start_time:.1f}s - {end_time:.1f}s "
+                f"({clip.duration:.1f}s, ~{expected_frames} frames @ {self.fps}fps)"
+            )
             return clip
-        except Exception as e:
-            logger.error(f"❌ Clip extraction failed: {e}")
+        except Exception:
+            logger.exception("❌ Clip extraction failed")
             raise
 
     def close(self):
@@ -86,17 +90,22 @@ class VerticalReframer:
     def reframe(cls, video_clip: VideoFileClip, method: str = 'crop') -> VideoFileClip:
         """Reframe to 9:16 vertical"""
         source_ratio = video_clip.w / video_clip.h
+        source_duration = video_clip.duration
 
         if abs(source_ratio - cls.TARGET_RATIO) < 0.01:
             logger.info("✓ Video already 9:16 format")
-            return video_clip.resized((cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
+            result = video_clip.resized((cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
+            logger.info(f"📊 Reframe (already 9:16): duration in {source_duration:.1f}s -> out {result.duration:.1f}s")
+            return result
 
         if method == 'crop' and source_ratio > cls.TARGET_RATIO:
             new_width = int(video_clip.h * cls.TARGET_RATIO)
             crop_x = (video_clip.w - new_width) // 2
             cropped = video_clip.cropped(x1=crop_x, y1=0, x2=crop_x + new_width, y2=video_clip.h)
             logger.info(f"✓ Cropped from {video_clip.w}x{video_clip.h} to {new_width}x{video_clip.h}")
-            return cropped.resized((cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
+            result = cropped.resized((cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
+            logger.info(f"📊 Reframe (crop): duration in {source_duration:.1f}s -> out {result.duration:.1f}s")
+            return result
 
         resized = video_clip.resized(height=cls.TARGET_HEIGHT)
         x_offset = (cls.TARGET_WIDTH - resized.w) // 2
@@ -104,6 +113,7 @@ class VerticalReframer:
         black_bg = ImageClip(np.zeros((cls.TARGET_HEIGHT, cls.TARGET_WIDTH, 3), dtype=np.uint8))
         final = CompositeVideoClip([black_bg, resized.with_position((x_offset, 0))],
                                   size=(cls.TARGET_WIDTH, cls.TARGET_HEIGHT))
+        logger.info(f"📊 Reframe (letterbox): duration in {source_duration:.1f}s -> out {final.duration:.1f}s")
         logger.info(f"✓ Letterboxed to {cls.TARGET_WIDTH}x{cls.TARGET_HEIGHT}")
         return final
 
@@ -190,8 +200,16 @@ class CaptionSynchronizer:
                 continue
 
         if caption_clips:
-            composite = CompositeVideoClip([video_clip] + caption_clips)
+            # Explicit with_duration() rather than relying on
+            # CompositeVideoClip's implicit max-end-time inference - the
+            # base video_clip should already determine this correctly
+            # since it starts at t=0 with no trim, but being explicit
+            # removes any ambiguity given how much this session's bugs
+            # have hinged on exactly this kind of implicit duration
+            # behavior in moviepy composites.
+            composite = CompositeVideoClip([video_clip] + caption_clips).with_duration(video_clip.duration)
             logger.info(f"✓ Rendered {len(caption_clips)} caption overlays")
+            logger.info(f"📊 Captions: duration in {video_clip.duration:.1f}s -> out {composite.duration:.1f}s")
             return composite
 
         return video_clip
@@ -324,6 +342,7 @@ class EffectsLayer:
 
             graded_clip = video_clip.transform(adjust_colors)
             logger.info("✓ Color grading applied (numpy-based)")
+            logger.info(f"📊 Color grading: duration in {video_clip.duration:.1f}s -> out {graded_clip.duration:.1f}s")
             return graded_clip
 
         except Exception:
@@ -387,8 +406,12 @@ class BrandingOverlay:
             watermark_clip = watermark_clip.with_position((x_pos, y_pos))
             watermark_clip = watermark_clip.with_effects([vfx.FadeIn(0.3), vfx.FadeOut(0.3)])
 
-            composite = CompositeVideoClip([video_clip, watermark_clip], size=video_clip.size)
+            # Explicit with_duration() rather than relying on
+            # CompositeVideoClip's implicit duration inference - see the
+            # same reasoning in CaptionSynchronizer.render_captions().
+            composite = CompositeVideoClip([video_clip, watermark_clip], size=video_clip.size).with_duration(video_clip.duration)
             logger.info(f"✓ Applied branding watermark: '{channel_name}'")
+            logger.info(f"📊 Branding: duration in {video_clip.duration:.1f}s -> out {composite.duration:.1f}s")
             return composite
 
         except Exception:
@@ -419,7 +442,15 @@ class VideoExporter:
         """
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = output_path.with_name(f".{output_path.name}.tmp")
+        # IMPORTANT: the temp filename must keep the real .mp4 suffix.
+        # ffmpeg infers the output container/muxer from the output
+        # filename's extension whenever no explicit -f flag is given -
+        # naming this `.short_001.mp4.tmp` (suffix .tmp) previously made
+        # ffmpeg unable to correctly identify the MP4 muxer, producing a
+        # small, broken-container file instead of raising a clear error.
+        # Putting the "incomplete" marker as an infix instead keeps the
+        # real .mp4 suffix intact so ffmpeg's format detection is correct.
+        temp_path = output_path.with_name(f".{output_path.stem}.tmp{output_path.suffix}")
 
         # A stale temp file from a previous crashed run must never be
         # mistaken for this run's output, and some ffmpeg configurations
@@ -430,8 +461,25 @@ class VideoExporter:
             except OSError as e:
                 logger.warning(f"⚠ Could not remove stale temp file {temp_path}: {e}")
 
+        # Expected values computed from the clip BEING EXPORTED, logged
+        # up front and compared against the real written file below - the
+        # "expected vs actual" signal needed to catch a corrupt/truncated
+        # export immediately instead of discovering it later in QC (or
+        # never, if QC's own checks happen to miss it too).
+        expected_duration = video_clip.duration or 0
+        expected_fps = getattr(video_clip, 'fps', None) or 30
+        expected_frames = int(expected_duration * expected_fps)
+        # Rough sanity-check heuristic (video bitrate dominates over the
+        # 128kbps audio track) - real compressed size varies with content,
+        # this is a ballpark for catching "way too small", not a strict bound.
+        expected_size_mb = (expected_duration * 6000 * 1000 / 8) / (1024 * 1024)
+
         try:
-            logger.info(f"📹 Exporting to {output_path.name} (preset: {preset})...")
+            logger.info(
+                f"📹 Exporting to {output_path.name} (preset: {preset}) - "
+                f"expecting ~{expected_duration:.1f}s ({expected_frames} frames @ {expected_fps}fps), "
+                f"~{expected_size_mb:.1f}MB at 6000kbps"
+            )
 
             video_clip.write_videofile(
                 str(temp_path),
@@ -453,7 +501,42 @@ class VideoExporter:
             temp_path.replace(output_path)
 
             file_size_mb = output_path.stat().st_size / (1024 * 1024)
-            logger.info(f"✓ Exported: {output_path.name} ({file_size_mb:.1f} MB)")
+            logger.info(f"✓ Exported: {output_path.name} ({file_size_mb:.1f} MB, expected ~{expected_size_mb:.1f}MB)")
+
+            # Verify the actual written file, not just its existence/size -
+            # re-open it and compare its REAL duration/frame count against
+            # what was expected. This is the check that would have caught
+            # this exact function's earlier temp-filename bug (a file that
+            # existed, wasn't zero-length, but had the wrong container/
+            # content) immediately at export time instead of only in QC.
+            try:
+                written_clip = VideoFileClip(str(output_path))
+                actual_duration = written_clip.duration or 0
+                actual_fps = written_clip.fps or expected_fps
+                actual_frames = int(actual_duration * actual_fps)
+                written_clip.close()
+
+                logger.info(
+                    f"📊 Export verification for {output_path.name}: "
+                    f"expected {expected_frames} frames ({expected_duration:.1f}s) vs "
+                    f"actual {actual_frames} frames ({actual_duration:.1f}s)"
+                )
+
+                if expected_duration > 0.1 and actual_duration < expected_duration * 0.5:
+                    logger.warning(
+                        f"⚠ {output_path.name}: actual duration ({actual_duration:.1f}s) is far "
+                        f"shorter than expected ({expected_duration:.1f}s) - the video content may "
+                        f"not have been written correctly even though the file exists"
+                    )
+                if expected_size_mb > 0.1 and file_size_mb < expected_size_mb * 0.3:
+                    logger.warning(
+                        f"⚠ {output_path.name}: file size ({file_size_mb:.1f}MB) is far below the "
+                        f"~{expected_size_mb:.1f}MB expected for a {expected_duration:.1f}s clip at "
+                        f"6000kbps - this usually means the export did not encode its full intended content"
+                    )
+            except Exception as verify_error:
+                logger.warning(f"⚠ Could not verify {output_path.name}'s real duration/frame count after export: {verify_error}")
+
             return str(output_path)
 
         except Exception:
