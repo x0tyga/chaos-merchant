@@ -1,177 +1,110 @@
 # CHAOS MERCHANT - PROJECT HANDOFF DOCUMENT
 
-**Current Date:** 2026-07-03
-**Branch:** `claude/github-abundant-aho-c2btu7` (this session's designated branch - see git log for the full commit sequence)
-**Status:** Full pipeline + intelligence layer + dashboard + publisher + Docker built. Every fix this session verified against mocked dependencies (no network access to real `moviepy`/`ffmpeg`/`anthropic`/etc. in this dev sandbox). **No clean end-to-end hardware run has happened since these fixes landed.**
-**Next Action:** Run the pipeline end-to-end on real hardware and observe what actually happens - see "NEXT STEPS" below.
+**Current Date:** 2026-07-06
+**Branch:** `claude/github-abundant-aho-c2btu7` (kept in sync 1:1 with `main` - every fix this session pushed to both)
+**Current model:** `claude-sonnet-5` (switched mid-session from `claude-fable-5`, which was used for Bugs 1 and 2)
+**Status:** First real-hardware run happened and produced broken output (1 MP4 instead of 7, ~7s unformatted video, no captions/effects/branding). Working through a 5-bug punch list from that run, one at a time, with a debrief + individual push to `main` after each fix. Bugs 1 and 2 fixed and pushed. Bugs 3-5 still outstanding.
+**Next Action:** Resume Bug 3 (captions cut off at bottom of screen) - see "BUGS STILL OUTSTANDING" below for the exact spec. Do not skip ahead to Bug 4/5 without going through Bug 3 first, per the user's explicit one-at-a-time process.
 
 ---
 
 ## EXECUTIVE SUMMARY
 
-### What happened this session (post-first-run hardening)
+### Where this session picked up
 
-The pipeline's **first real-hardware run** happened today and produced broken output: 1 MP4 instead of 7, a ~7-second unformatted video, no captions/effects/branding, and a loose file instead of an organized batch folder. No logs were available from that run (different machine), so root causes were diagnosed via code trace, not log inspection. Everything found was fixed and verified against hand-built fakes matching each library's documented API shape - **not** against the real libraries, which still can't be installed in this dev sandbox (no network access to pip).
+A prior hardening session (see git history before today) fixed a long list of setup/scaffolding/incomplete-implementation issues and did a full documentation + Docker pass. Today's session started from a **real hardware run** - the first time this pipeline had ever executed against real moviepy/ffmpeg/Kokoro instead of mocks - and it broke in five distinct ways. The user gave an explicit bug list and an explicit process: fix one bug at a time, in order, full root-cause debrief after each, push to `main` individually so the user can pull and test between fixes. That process is still in effect.
 
-Work proceeded in six categories, each committed and pushed separately, each with its own debrief:
+### Bugs fixed today
 
-1. **Critical bugs** - the actual root causes of last night's broken output, plus a `quality_control.py` moviepy 1.x import that broke QC entirely on `main` before this session started.
-2. **Setup/requirements automation** - `setup.sh` now auto-downloads Kokoro's model files (with corruption detection), attempts to auto-patch ImageMagick's caption-blocking policy, and `main.py` pre-flight-checks all of this before starting.
-3. **Incomplete implementations** - wired real `pytrends-modern` into Trend Intelligence, removed all placeholder/mock seed data from Competitor Monitor, and - the deepest change - made script/voiceover/SEO generation genuinely **per-clip** instead of one shared pass reused across all 7 shorts. Wired the previously-dead Hook Library logging into the pipeline.
-4. **Three new intelligence agents** - Analytics & Feedback, Comment Mining, Thumbnail Research - all built to degrade cleanly to "no data yet" on a fresh channel (explicit requirement, since this channel has zero posted videos).
-5. **Dashboard + Publisher** - a complete Flask dashboard (7 pages, in-browser `.env`/prompt-file editing) and a Publisher module for YouTube/TikTok/Instagram auto-upload, all three platforms off by default. Found and fixed two prerequisites along the way: `ChannelMemory.add_short()` was never actually called anywhere, and there was no Claude API cost tracking at all.
-6. **Documentation + Docker** (this category) - rewrote README/HANDOFF, created KNOWN_ISSUES.md, built Dockerfile + docker-compose.yml.
+**Bug 1 - Original source video audio bleeding through underneath voiceover/music.**
+Root cause: `AudioProcessor.prepare_audio()` in `agents/video_production.py` was still building final audio using the source video clip's own audio track - there was no real background-music infrastructure anywhere in the codebase, so whatever the "music" layer was actually doing, the source audio was never actually excluded from the composite.
+Fix: two-part structural strip, not a volume-based patch.
+1. Extracted clips get `.without_audio()` called immediately after extraction in `produce_single_short()`, before any reframe/composite step - the source audio is severed at the earliest possible point, structurally, so no downstream code path can accidentally reintroduce it.
+2. Added a new `BackgroundMusicLibrary` class that loads a real royalty-free track from `assets/music/` (rotating by short number, looping/trimming to the clip's duration), and `prepare_audio()` was rewritten to build final audio exclusively from `voiceover_audio` + this explicit `background_music` parameter - it no longer reads `video_clip.audio` at all.
+Verified via audio-lineage fake objects (each fake audio carries an origin-tag set like `{'srcaudio'}`, `{'voiceover'}`, `{'music:track.mp3'}` propagated through every operation) proving the final composited audio's lineage never contains `'srcaudio'`, with and without background music present, end-to-end through `produce_single_short()`.
 
-**Full bug-by-bug detail is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) - this document is current state and next steps, not a changelog.**
+**Bug 2 - Music way louder than voiceover (prior -6dB ducking wasn't enough, and music played at full volume outside the voiceover window entirely).**
+Root cause: two compounding issues - insufficient ducking depth, and no base-level attenuation at all when no voiceover was playing (gain 1.0 = full volume the rest of the time). There was also a real risk (per a prior audit) that a `volumex`-style lambda could silently fail against moviepy's actual render pipeline and never get caught.
+Fix: replaced `apply_music_ducking()` entirely with `apply_music_envelope()` - a full gain envelope: **-12dB base** (music's own volume) outside the voiceover, **-18dB duck** during it, with 0.25s linear ramps between the two so there's no audible click. Configurable via `MUSIC_BASE_DB`/`MUSIC_DUCK_DB` env vars, with defensive parsing (a typo'd `.env` value degrades to defaults with a logged warning, never crashes).
+Critically, this also closes the exact silent-failure risk the user named: a new `_verify_envelope_callback()` step invokes the *actual* render callback moviepy will run at render time, immediately after constructing it, with synthetic frames at known timestamps (mid-voiceover, before/after, ramp midpoints) - and checks the measured gain against the expected value. If verification fails, `apply_music_envelope()` returns the original un-enveloped audio with `applied=False` and a loud `logger.error`, rather than silently shipping a broken envelope. This makes "ducking silently not applied" structurally detectable going forward instead of only discoverable by ear.
+Verified via direct measurement of the real render callback (scalar and moviepy's actual batch/array call shape, mono and stereo), env var overrides, and confirming the verifier itself correctly rejects both a no-op callback and a wrong-gain-level callback while accepting the real one.
 
-### The one thing to internalize before touching this project again
+Both fixes are in `agents/video_production.py` only. `.env.example` gained `BACKGROUND_MUSIC_DIR`, `MUSIC_BASE_DB`, `MUSIC_DUCK_DB`. A new `assets/music/README.md` documents the folder's usage.
 
-Every single fix and every new feature this session was verified by exercising the affected code against realistic hand-built fakes (fake moviepy clips, fake Anthropic/YouTube/TikTok/Instagram API responses, a minimal fake `PIL.Image`, etc.) - because this dev sandbox has no network access to install `moviepy`, `ffmpeg`, `anthropic`, `kokoro-onnx`, `googleapiclient`, `yt-dlp`, `Pillow`, or `Flask`/`Werkzeug` for real. That verification method is real and was applied rigorously (see each category's commit message for exactly what was tested), but it is **not the same as a real hardware run.** Nothing in this document should be read as "confirmed working" beyond "confirmed logically correct against a faithful mock of the real API."
+### Assets needed before these can be tested for real
 
----
-
-## CURRENT ARCHITECTURE
-
-```
-core/
-  pipeline.py       Steps 1-7 orchestrator, checkpoint/recovery, batch_id generation
-  memory.py         Hook Library + Channel Memory (SQLite, WAL mode)
-  scheduler.py       QuotaTracker / JobTracker / ChaosScheduler
-  recovery.py        Checkpoint listing/cleanup
-  publisher.py        YouTube/TikTok/Instagram auto-upload (all off by default)
-  cost_tracker.py      Real Claude API spend tracking (data/cost_log.json)
-  notifications.py      Desktop notifications (macOS/Linux, used by spike detection)
-  quality_test.py        Kokoro vs ElevenLabs comparison utility
-
-agents/  (Steps 1-7 = production pipeline, called by pipeline.py)
-  watcher.py                 file system monitoring
-  clip_intelligence.py       Step 1: scene detection + engagement scoring
-  script_voiceover.py        Step 2: PER-CLIP script gen (Claude) + voiceover (Kokoro/ElevenLabs)
-  seo_optimizer.py           Step 3: PER-CLIP SEO metadata
-  video_production.py        Step 4: ffmpeg/moviepy assembly, captions/ducking/grading/branding
-  thumbnail.py                Step 5: PER-CLIP Canva MCP or brief-only
-  quality_control.py           Step 6: validation + pass/warning/manual_review routing
-  output_packaging.py           Step 7: batch folder assembly
-
-agents/  (scheduled intelligence agents, registered in main.py)
-  trend_intelligence.py       daily 7am
-  competitor_monitor.py       every 3h
-  analytics_feedback.py       daily 9am
-  comment_mining.py           weekly Sunday 10am
-  thumbnail_research.py       weekly Sunday 10am
-
-dashboard/    Flask app (dashboard/app.py) - run separately: python dashboard/app.py
-config/       competitors.json, gaming_calendar.json (both auto-created empty, user-maintained)
-prompts/      script_generation.txt, seo_optimization.txt, thumbnail_prompt.txt (auto-updated),
-              vocabulary_reference.txt (auto-updated)
-```
-
-### Data flow (per source video)
-
-```
-INPUT: source_video.mp4
-  ↓
-[Clip Intelligence] → clip_manifest.json: top_clip_indices (up to 7), per-clip engagement/audio scores
-  ↓
-[Script + Voiceover] → ONE call per clip index: script_voiceover_results[i] = {script, voiceover audio path}
-  ↓
-[SEO Optimizer] → ONE call per clip index, using that clip's own script: seo_results[i]
-  ↓
-[Video Production] → produces up to 7 MP4s, each using ITS OWN clip's script_voiceover_results[i] for
-                      captions/audio. short_results[] maps short_number -> clip_idx -> output_path
-                      (NOT positionally reliable once any short fails - use short_results, not index)
-  ↓
-[Thumbnail] → ONE call per clip index, using that clip's own SEO + script: thumbnails[i]
-  ↓
-[Quality Control] → validates all produced videos + metadata completeness, routes pass/warning/manual_review
-  ↓
-[Output Packaging] → output/batch_<id>/{shorts,thumbnails,upload_metadata,manifests}/, README.md
-
-Also, right after Video Production and Thumbnail complete:
-  Pipeline._log_hook_usage()     → logs each produced short's hook to Hook Library (placeholder, pre-performance)
-  Pipeline._log_channel_memory() → adds a channel_shorts row per produced short (title/topic/hook/thumbnail/caption style)
-```
+**`assets/music/` currently contains only a README - no actual audio files.** Bugs 1 and 2 cannot be meaningfully tested on real hardware until royalty-free music tracks are actually dropped into that folder (supported formats: `.mp3/.wav/.m4a/.aac/.ogg/.flac`). Without any tracks present, `BackgroundMusicLibrary.load_for_short()` degrades to `None` and the pipeline runs voiceover-only - which will falsely look like Bug 1 is "fixed" (no source audio, but also no music) without actually exercising the ducking/base-level logic in Bug 2 at all.
 
 ---
 
-## WHAT'S REAL VS. WHAT'S SCAFFOLDING
+## BUGS STILL OUTSTANDING
 
-| Area | State |
-|---|---|
-| Steps 1-7 (production pipeline) | Real, per-clip, fail-loud on genuine failures. **Never run against real moviepy/ffmpeg/Kokoro in this session's sandbox** |
-| Trend Intelligence | Real Reddit (PRAW) + RSS + Google Trends (`pytrends-modern`, unofficial); hardcoded fallback list only if all real sources fail |
-| Competitor Monitor | Real YouTube Data API; starts with an empty competitor list, no mock seed data |
-| Hook Library / Channel Memory | Real SQLite, both tables now actually get written to during normal pipeline operation |
-| Analytics & Feedback | Real YouTube Data API (public stats) + optional real YouTube Analytics API (OAuth, private metrics). Degrades cleanly with zero published shorts - **genuinely untested against a real published video**, since none exist yet |
-| Comment Mining | Real YouTube comment pulls (own + competitor), real Claude sentiment analysis. Same "no data yet" caveat |
-| Thumbnail Research | Real yt-dlp trending scrape + Pillow analysis. Same caveat |
-| Dashboard | Real Flask app reading real files/SQLite. **Flask itself was never actually run** in this dev sandbox (not installable) - verified via raw Jinja2 template rendering + static route cross-checks instead |
-| Publisher - YouTube | Real resumable upload code, built on a stable/unchanged API and this project's existing OAuth pattern. Never actually authorized or uploaded a real video |
-| Publisher - TikTok/Instagram | Real request-shape code per each platform's documented API. **Never exercised against a live endpoint** - no approved TikTok app, no live Instagram token available |
-| Docker | Dockerfile + docker-compose.yml built this session, **never actually built/run** (no Docker daemon in this sandbox) |
+Work resumes here, in this order, one at a time, with a debrief + individual push after each.
+
+### Bug 3 - Captions cut off at the bottom of the screen (up next)
+
+**Current spec (this supersedes the original bug list's "85% from top" - the user refined it when giving the go-ahead):** move caption position up so captions sit at **80% from the top of the frame**, with a **minimum 80px margin from the bottom edge**.
+
+Also required in the same pass:
+- Full trace of the caption pipeline in `agents/video_production.py`'s `CaptionSynchronizer` class, from text generation (`generate_caption_timeline()`) through burned-in frame rendering (`render_captions()`), to confirm captions are genuinely appearing in the exported MP4 - not just processed and silently dropped.
+- Fix any conditions where captions fail silently and the video exports without them.
+- Check that the caption font is actually available on macOS, and that ImageMagick's policy isn't blocking text rendering (a known moviepy/ImageMagick gotcha - `TextClip` shells out to ImageMagick's `convert`, which ships with a default security policy that blocks text/label operations on many Linux distros and can also bite on macOS installs).
+- Add a post-export verification step that samples frames from the finished video and confirms caption pixels are actually present (mirrors the same "don't trust the writer, verify the artifact" pattern already used for `VideoExporter.export_mp4()`'s atomic-write fix).
+
+**Investigation status:** just started, paused immediately by the user's "stop everything" interrupt for this HANDOFF.md update. Only code reading has happened so far - zero edits made. The exact line identified as the root of the current cutoff is in `render_captions()`:
+```python
+text_clip.with_position(('center', video_clip.h - self.SAFE_MARGIN - 100))
+```
+This hardcodes captions 160px up from the bottom (`SAFE_MARGIN=60` + a flat `100`), regardless of video height - it needs to become a calculation anchored at 80% of `video_clip.h` from the top, clamped so it never sits closer than 80px to the bottom edge. ImageMagick policy, macOS font availability, silent-failure paths, and post-export frame verification have not been investigated yet at all.
+
+### Bug 4 - Video goes black and silent after 30 seconds despite the clip being longer
+
+Root cause not yet investigated. Per the original bug report: there's a duration mismatch between the video clip and the voiceover - something in the pipeline is reconciling the two by cutting the video down to the voiceover's length instead of letting the video play its full duration with voiceover covering only its own generated portion. Needs tracing through wherever clip duration and voiceover duration currently get reconciled in `agents/video_production.py` (likely in `produce_single_short()` or `AudioProcessor`/`CompositeVideoClip` duration handling) and a fix so the video always plays its full intended duration.
+
+### Bug 5 - Output count: fewer Shorts produced than clips detected
+
+Root cause not yet investigated. Per the original bug report: the per-clip loop appears to complete, but individual clips may be failing silently without clear logging, so fewer than the expected number of Shorts come out the other end with no visible explanation. Needs detailed per-clip logging added (clip number, current step, pass/fail, and why on failure) and any silent-failure paths found and fixed, so every clip either produces a Short or produces a clear, explanatory error in the logs/manifest.
 
 ---
 
-## NEXT STEPS
+## DIRECTION DECISIONS (made today, not yet implemented in code)
 
-In order:
+These are decisions the user has made about where the project is headed next. Neither has any corresponding code in the repository yet - both are documented here as decided-but-not-yet-built direction, to be scoped and implemented in future sessions.
 
-1. **Run the pipeline end-to-end on real hardware.** This is the single highest-value next action - nothing else in this list matters until this happens once, cleanly, with logs captured. Follow the Quick Start in README.md. Capture `logs/chaos_merchant.log` and every `output/*_manifest.json` regardless of outcome.
-2. **If it fails:** check [KNOWN_ISSUES.md](KNOWN_ISSUES.md) first - many likely failure modes (ImageMagick policy, Kokoro model files, moviepy API drift) are already documented with fixes. If it's a genuinely new failure, add it to KNOWN_ISSUES.md with the same format (root cause, fix, status) rather than just patching silently.
-3. **If it succeeds:** verify the batch folder actually has 7 shorts, each with real burned-in captions and distinct titles/scripts (not the same content 7 times - this was the deepest bug fixed this session, worth specifically checking it stuck).
-4. **Try the dashboard**: `python dashboard/app.py`, confirm all 7 pages load against real (not fake) data, confirm the Settings page's `.env`/prompt-file editing round-trips correctly.
-5. **Only after a clean hardware run:** consider enabling `AUTO_POST_YOUTUBE` for a real test upload (small/private video first), or building out Docker verification (`docker-compose up` should require zero manual setup - confirm that's actually true).
+### Format pivot: away from emotion-based reaction scripts, toward format templates
 
-### Useful commands
+Moving away from the current script-generation approach (emotion-based reaction scripts) toward **multiple format templates**, at minimum:
+- News recap
+- Hidden details
+- Ranking
+- Comparison
 
-```bash
-# Check databases
-sqlite3 data/chaos_merchant.db "SELECT * FROM hooks;"
-sqlite3 data/chaos_merchant.db "SELECT * FROM channel_shorts;"
-sqlite3 data/chaos_merchant.db "SELECT * FROM hook_usage_log ORDER BY used_at DESC LIMIT 10;"
+...selected via a new **format selector agent**. No design work has been done yet on how the selector chooses a format per clip, how each template's prompt differs from the current `prompts/script_generation.txt` approach, or how this interacts with the existing per-clip script generation (`agents/script_voiceover.py`). This will need its own scoping pass before implementation starts.
 
-# Check quota / job / cost state
-cat data/quota_tracker.json
-cat data/job_tracker.json
-cat data/cost_log.json
+### Autonomous clip sourcing: yt-dlp-based auto-sourcing
 
-# Check latest scheduled-agent output
-cat data/trend_intelligence_latest.json
-cat data/competitor_alerts_latest.json
-cat data/ideas_backlog.json
+Moving away from requiring manual video drops into the input folder, toward the system **finding and downloading its own source footage** using `yt-dlp` (already a dependency in this codebase, currently used only by `agents/thumbnail_research.py` for trending-thumbnail scraping) from:
+- Reddit
+- YouTube
+- Twitter
 
-# Force a fresh pipeline run for one video (clears its checkpoint)
-rm -f data/checkpoints/*_checkpoint.json
-
-# One-time OAuth setup
-python -m agents.analytics_feedback setup   # YouTube Analytics (impressions/AVD/retention)
-python -m core.publisher setup-youtube       # YouTube upload
-
-# Manually trigger a scheduled agent
-python -m agents.trend_intelligence
-python -m agents.comment_mining
-python -m agents.thumbnail_research
-
-# Dashboard
-python dashboard/app.py   # http://127.0.0.1:5050
-
-# Docker (never actually run this session - verify it works)
-docker-compose up
-```
+No design work has been done yet on sourcing criteria (what makes a video worth pulling), rate limits/ToS considerations per platform, dedup against already-processed content, or where in the pipeline this slots in relative to `watcher.py`'s current file-system-monitoring role. This will also need its own scoping pass before implementation starts.
 
 ---
 
 ## HOW TO RESUME THIS PROJECT
 
-1. Read this HANDOFF.md, then [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for full bug/limitation detail.
-2. `git log --oneline -15` and `git status` to see exactly where things stand.
-3. If a clean hardware run hasn't happened yet, that's the next action - see "NEXT STEPS" above.
-4. If it has: update this document with what actually happened (success or new failures), and move KNOWN_ISSUES.md's "still unverified" items into either "fixed" or a newly-documented issue as appropriate.
+1. Read this HANDOFF.md top to bottom - it reflects the exact current state as of the interrupt that triggered this update.
+2. `git log --oneline -15` and `git status` to confirm exactly which fixes have landed on `main`.
+3. If the user hasn't given the go-ahead for Bug 3 yet, don't start it - the standing process for this bug list is one bug at a time, debrief, individual push, then wait for explicit go-ahead.
+4. If Bug 3 is already underway or done per git log, move to Bug 4, then Bug 5, in that order.
+5. Once all 5 bugs are fixed and the user has real music files in `assets/music/`, the next real milestone is another clean hardware run to confirm Bugs 1-5 actually resolved what was seen in production, not just in mocks.
+6. The format-template pivot and autonomous clip-sourcing decisions are queued behind the bug list - don't start scoping either until the user explicitly asks for it.
 
 ---
 
 ## DOCUMENT META
 
 **Document created:** 2026-07-02
-**Last updated:** 2026-07-03, end of the post-first-run hardening session (Categories 1-6: critical bugs, setup automation, incomplete implementations, three new intelligence agents, dashboard + publisher, documentation + Docker)
-**Status:** Feature-complete for the originally-scoped build; first clean end-to-end hardware run since this session's fixes is the next concrete action
+**Last updated:** 2026-07-06, mid-bugfix-session (Bugs 1 and 2 of a 5-bug punch list fixed and pushed; Bug 3 investigation paused on explicit user interrupt to update this document)
+**Status:** Active bug-fixing session in progress. Bugs 1-2 fixed, Bugs 3-5 outstanding, two direction decisions (format pivot, autonomous sourcing) recorded but not yet scoped or implemented.
