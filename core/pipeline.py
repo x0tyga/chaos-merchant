@@ -324,7 +324,12 @@ class Pipeline:
                     vr = generate_voiceover_for_clip(
                         clip_data, i,
                         trending_topics=trending_topics,
-                        channel_history=channel_history
+                        channel_history=channel_history,
+                        # Lets the script generator extract keyframes from
+                        # this clip's actual segment and react to what is
+                        # literally on screen, instead of generating blind
+                        # from engagement scores.
+                        source_video_path=str(self.video_path)
                     )
                     voiceover_results.append(vr)
                 except Exception as e:

@@ -5,12 +5,15 @@ Generates scripts for chaotic, high-energy viral moments across any topic
 Primary: Kokoro TTS (free, local CPU)
 """
 
+import base64
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from typing import List, Optional, Tuple
 import tempfile
 
 from anthropic import Anthropic
@@ -19,29 +22,216 @@ from core.cost_tracker import log_anthropic_usage
 
 logger = logging.getLogger(__name__)
 
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    logger.warning("opencv-python not available - clip content analysis will be skipped (scripts fall back to metadata-only generation)")
+
 SCRIPT_PROMPT_PATH = Path('./prompts/script_generation.txt')
 
-DEFAULT_SCRIPT_INSTRUCTIONS = """Generate a YouTube Shorts voiceover script for ONE specific clip
-taken from a longer source video. Write about what's happening in THIS
-clip specifically, not the source video as a whole.
+DEFAULT_SCRIPT_INSTRUCTIONS = """You are writing a voiceover script for one specific clip from a longer
+video. Your job is to react to what is actually in this clip - not to
+generate generic excitement that could sit on top of any video.
 
-This channel covers chaotic, high-energy viral moments across ANY topic -
-gaming, golf, sports, internet culture, unexpected/unhinged moments - not
-just gaming. GTA6 is the current primary focus given its release timing,
-but write for whatever this specific clip is actually about.
+Voice: a knowledgeable friend who just watched this exact clip and is
+explaining why it is actually worth your attention. Think of a sports
+commentator who explains the play - what happened, why it is hard, what
+it means - not one who just yells over it. The energy comes from
+specificity and pacing, not from hype words or exclamation points.
 
-RULES:
-1. Hook first (0-3 seconds) - MUST grab attention immediately
-2. Main content (3-30 seconds) - explain the clip, build tension
-3. Call-to-action (30-45 seconds) - subscribe/like/comment
-4. Total words: 120-180 words (reads at ~150 wpm = 48-72 seconds)
+GTA 6 is the channel's current primary focus. When the clip is GTA 6
+content, write for someone who follows the game: name the character, the
+location, the mission, the mechanic - whatever the clip actually shows -
+and explain why it matters to someone tracking this game.
 
-TONE:
-- High energy, enthusiastic, a little unhinged
-- Vernacular matched to the clip's actual topic (gaming slang for gaming
-  content, sports/golf terminology for sports content, etc.)
-- Short sentences, punchy delivery
-- Emphasize surprise, humor, chaos, and skill/skill-fail moments"""
+HARD RULES - never break these:
+1. The hook must reference something that literally happens in THIS
+   specific clip: a character, a location, a mechanic, a detail. Never a
+   generic opener that could introduce any video.
+2. Never write a word in all capital letters. The text-to-speech engine
+   reads all-caps words letter by letter and ruins the audio. Normal
+   acronyms like GTA are fine.
+3. Banned words and phrases - never use any of them: "crazy", "insane",
+   "unhinged", "mind blowing", "mind-blowing", "you won't believe". If
+   you are tempted to reach for one, write the specific detail that made
+   you reach for it instead.
+4. Short, punchy sentences - but every sentence carries real information.
+   Cut any sentence that only adds energy without adding a fact.
+5. The reaction must be earned by the content. If the clip shows
+   something genuinely unusual, say exactly what is unusual about it and
+   why. Do not manufacture excitement the clip does not support.
+
+STRUCTURE:
+1. Hook (0-3 seconds): the specific detail, stated plainly, that makes
+   someone stop scrolling.
+2. Body (3-30 seconds): explain what is happening and why it matters -
+   the context a casual viewer would miss.
+3. Close (last few seconds): a natural sign-off; a genuine question about
+   the clip beats a generic subscribe plea.
+4. Total: 120-180 words.
+
+If a clip content description is provided below, treat it as the ground
+truth of what is on screen - build the entire script from those
+specifics. If no description is available, build from the clip's timing
+and audio data and stay concrete; never invent specific events you cannot
+know happened."""
+
+# Words/phrases that must never reach the TTS engine or captions - the
+# prompt above bans them, and this deterministic post-pass guarantees it
+# even if the model slips. Replacements are deliberately neutral; every
+# substitution is logged so a prompt that keeps producing banned words is
+# visible rather than silently papered over.
+BANNED_SCRIPT_PHRASES = [
+    ("you won't believe", 'look at'),
+    ('mind blowing', 'remarkable'),
+    ('mind-blowing', 'remarkable'),
+    ('unhinged', 'chaotic'),
+    ('insane', 'remarkable'),
+    ('crazy', 'wild'),
+]
+
+# All-caps words of this length or shorter are assumed to be real acronyms
+# (GTA, VI, NPC, AI, TV...) and left alone - TTS spelling those out letter
+# by letter is correct pronunciation. Longer all-caps words are shouting,
+# which TTS also spells out letter by letter, ruining the audio.
+MAX_ACRONYM_LENGTH = 3
+ALL_CAPS_WHITELIST = {'LSPD', 'NPCS'}
+
+
+def _sanitize_script_text(text: str) -> Tuple[str, List[str]]:
+    """
+    Deterministic enforcement of the two TTS-critical script rules, applied
+    after every generation regardless of how well the model followed the
+    prompt: (1) no all-caps words (read letter-by-letter by TTS), (2) no
+    banned generic-hype words/phrases. Returns (clean_text, changes) where
+    changes describes every substitution made, for logging.
+    """
+    if not text:
+        return text, []
+
+    changes = []
+
+    def _fix_caps(match):
+        word = match.group(0)
+        if len(word) <= MAX_ACRONYM_LENGTH or word in ALL_CAPS_WHITELIST:
+            return word
+        fixed = word.capitalize()
+        changes.append(f'all-caps "{word}" -> "{fixed}"')
+        return fixed
+
+    text = re.sub(r'\b[A-Z]{2,}\b', _fix_caps, text)
+
+    for banned, replacement in BANNED_SCRIPT_PHRASES:
+        def _replace(match):
+            original = match.group(0)
+            fixed = replacement.capitalize() if original[0].isupper() else replacement
+            changes.append(f'banned "{original}" -> "{fixed}"')
+            return fixed
+        text = re.sub(re.escape(banned), _replace, text, flags=re.IGNORECASE)
+
+    return text, changes
+
+
+class ClipContentAnalyzer:
+    """
+    Extracts keyframes from one specific clip segment of the source video
+    (OpenCV, already a core dependency) and asks Claude Haiku vision for a
+    factual description of what is literally happening on screen - the
+    ground truth the script generator reacts to, instead of generating
+    blind from engagement scores alone. One vision call per clip.
+    """
+
+    NUM_FRAMES = 3
+    MAX_FRAME_WIDTH = 768  # downscale before sending - keeps vision token cost low
+    JPEG_QUALITY = 80
+
+    def __init__(self):
+        self.client = Anthropic()
+
+    def describe_clip(self, source_video_path: str, start_time: float, end_time: float) -> Optional[str]:
+        """Returns a factual description of the clip's content, or None if analysis isn't possible."""
+        frames = self._extract_frames(source_video_path, start_time, end_time)
+        if not frames:
+            return None
+
+        duration = end_time - start_time
+        content = []
+        for frame_b64 in frames:
+            content.append({
+                'type': 'image',
+                'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': frame_b64}
+            })
+        content.append({
+            'type': 'text',
+            'text': (
+                f"These are {len(frames)} frames sampled from the start, middle, and end "
+                f"of a {duration:.0f}-second video clip. Describe factually what is "
+                f"happening: who or what is on screen, the location or setting, any "
+                f"visible game UI or mechanics, and what changes across the frames. "
+                f"Name specific identifiable things (the game, characters, vehicles, "
+                f"locations) when you are confident. 2-4 sentences of plain factual "
+                f"observation - no hype, no speculation beyond what is visible."
+            )
+        })
+
+        try:
+            response = self.client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=300,
+                messages=[{"role": "user", "content": content}]
+            )
+            log_anthropic_usage('clip_content_analysis', response)
+            description = response.content[0].text.strip()
+            logger.info(f"✓ Clip content described: {description[:100]}...")
+            return description or None
+        except Exception as e:
+            logger.warning(f"⚠ Clip content analysis failed (script will generate from metadata only): {e}")
+            return None
+
+    def _extract_frames(self, source_video_path: str, start_time: float, end_time: float) -> List[str]:
+        """Grabs NUM_FRAMES evenly spaced frames from [start_time, end_time] as base64 JPEGs."""
+        if not CV2_AVAILABLE:
+            logger.info("ℹ opencv-python unavailable, skipping clip content analysis")
+            return []
+        if not Path(source_video_path).exists():
+            logger.warning(f"⚠ Source video not found for content analysis: {source_video_path}")
+            return []
+
+        cap = None
+        try:
+            cap = cv2.VideoCapture(str(source_video_path))
+            duration = max(0.1, end_time - start_time)
+            # Sample away from the exact edges - the first/last instants of
+            # a scene-detected segment are often mid-transition frames.
+            timestamps = [start_time + duration * f for f in (0.15, 0.5, 0.85)][:self.NUM_FRAMES]
+
+            frames = []
+            for ts in timestamps:
+                cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                h, w = frame.shape[:2]
+                if w > self.MAX_FRAME_WIDTH:
+                    scale = self.MAX_FRAME_WIDTH / w
+                    frame = cv2.resize(frame, (self.MAX_FRAME_WIDTH, int(h * scale)))
+                ok, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), self.JPEG_QUALITY])
+                if ok:
+                    frames.append(base64.b64encode(buffer.tobytes()).decode('ascii'))
+
+            logger.info(f"✓ Extracted {len(frames)} keyframes from clip ({start_time:.1f}s - {end_time:.1f}s) for content analysis")
+            return frames
+        except Exception as e:
+            logger.warning(f"⚠ Keyframe extraction failed: {e}")
+            return []
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
 
 
 def _load_script_instructions() -> str:
@@ -99,12 +289,27 @@ class ScriptGenerator:
         except (json.JSONDecodeError, ValueError):
             # Fallback: create structured script from response
             script_data = {
-                'hook': 'Check out this crazy moment!',
+                'hook': 'Here is the moment worth watching.',
                 'main_content': response_text[:200],
                 'cta': 'Drop a like and subscribe for more!',
                 'full_script': response_text,
                 'reading_time_seconds': 40
             }
+
+        # Deterministic enforcement of the TTS-critical rules (no all-caps
+        # words, no banned hype words) on every text field that reaches the
+        # TTS engine, captions, or hook library - the prompt asks for these
+        # rules, this guarantees them even when the model slips.
+        all_changes = []
+        for field in ('hook', 'main_content', 'cta', 'full_script'):
+            if isinstance(script_data.get(field), str):
+                script_data[field], changes = _sanitize_script_text(script_data[field])
+                all_changes.extend(changes)
+        if all_changes:
+            logger.warning(
+                f"⚠ Script sanitizer corrected {len(all_changes)} rule violation(s) the model "
+                f"produced despite the prompt: {'; '.join(all_changes)}"
+            )
 
         return script_data
 
@@ -153,7 +358,8 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
             logger.error(f"❌ Script generation failed: {e}")
             raise
 
-    def generate_script_for_clip(self, clip_data, clip_index, trending_topics=None, channel_history=None):
+    def generate_script_for_clip(self, clip_data, clip_index, trending_topics=None,
+                                 channel_history=None, clip_description=None):
         """
         Generate a voiceover script scoped to ONE specific clip, not the
         whole source video - each of the 7 shorts gets its own hook/script
@@ -166,14 +372,31 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
             clip_index: This clip's position among the selected shorts (0-based)
             trending_topics: List of trending topics
             channel_history: Previous video summaries
+            clip_description: Factual description of what is literally on
+                screen in this clip (from ClipContentAnalyzer's keyframe
+                vision pass) - the ground truth the script reacts to. When
+                None, the prompt says so explicitly so the model stays
+                concrete without inventing events it cannot know.
 
         Returns:
             dict: Generated script with metadata
         """
         logger.info(f"📝 Generating script for clip {clip_index + 1}...")
 
+        if clip_description:
+            content_section = f"""What is actually happening in this clip (ground truth from frame analysis):
+{clip_description}"""
+        else:
+            content_section = (
+                "No visual content description is available for this clip. Build the "
+                "script from the timing and audio data below, stay concrete, and do "
+                "not invent specific events you cannot know happened."
+            )
+
         instructions = _load_script_instructions()
         prompt = f"""{instructions}
+
+{content_section}
 
 Clip data:
 - Clip #{clip_index + 1}
@@ -541,7 +764,8 @@ def generate_voiceover(clip_data, trending_topics=None, channel_history=None):
     }
 
 
-def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None, channel_history=None):
+def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None,
+                                channel_history=None, source_video_path=None):
     """
     Generate a script + voiceover scoped to ONE specific clip. Each of the
     7 shorts calls this independently, producing its own hook/script and
@@ -554,14 +778,37 @@ def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None, cha
         clip_index: This clip's position among the selected shorts (0-based)
         trending_topics: Trending topics for context
         channel_history: Previous video data
+        source_video_path: Path to the source video. When provided, this
+            clip's segment gets a keyframe content analysis (one Haiku
+            vision call) so the script reacts to what is literally on
+            screen instead of generating blind from engagement scores.
+            When None (or analysis fails), script generation proceeds
+            from metadata only - degraded, not broken.
 
     Returns:
-        dict: Script + voiceover results for this one clip
+        dict: Script + voiceover results for this one clip, including the
+        clip_description used (or None) so downstream consumers and
+        debugging can see exactly what the script was reacting to.
     """
     logger.info(f"🎬 Starting script + voiceover generation for clip {clip_index + 1}...")
 
+    clip_description = None
+    if source_video_path:
+        start_time = clip_data.get('start_time', 0)
+        end_time = clip_data.get('end_time', clip_data.get('duration', 0))
+        if end_time > start_time:
+            analyzer = ClipContentAnalyzer()
+            clip_description = analyzer.describe_clip(source_video_path, start_time, end_time)
+        else:
+            logger.warning(f"⚠ Clip {clip_index + 1} has invalid timing ({start_time} -> {end_time}), skipping content analysis")
+    if clip_description is None:
+        logger.info(f"ℹ Clip {clip_index + 1}: no content description available, generating script from metadata only")
+
     generator = ScriptGenerator()
-    script_result = generator.generate_script_for_clip(clip_data, clip_index, trending_topics, channel_history)
+    script_result = generator.generate_script_for_clip(
+        clip_data, clip_index, trending_topics, channel_history,
+        clip_description=clip_description
+    )
 
     if script_result['status'] != 'success':
         raise RuntimeError(f"Script generation failed for clip {clip_index + 1}")
@@ -575,6 +822,7 @@ def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None, cha
         'status': 'success',
         'clip_index': clip_index,
         'script': script,
+        'clip_description': clip_description,
         'voiceover': voiceover_result,
         'timestamp': datetime.now().isoformat()
     }
