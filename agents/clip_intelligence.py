@@ -353,20 +353,72 @@ class VideoAnalyzer:
 def analyze_video(video_path, num_clips=7, scene_threshold=25.0):
     """
     Main function to analyze video and generate clip manifest
-    
+
     Args:
         video_path: Path to video file
         num_clips: Number of clips to extract (default: 7)
         scene_threshold: Scene detection sensitivity (0-100)
-    
+
     Returns:
         dict: Analysis manifest with clip data
     """
     logger.info(f"🎬 Analyzing video: {video_path}")
-    
+
     analyzer = VideoAnalyzer(video_path)
-    
+
     try:
+        # Autonomously-sourced clips (agents/clip_sourcing.py) are often
+        # already short-form (a Reddit clip, a single viral YouTube short)
+        # rather than a longer compilation for scene-detection to slice up
+        # - forcing scene detection/segmentation on a video that's already
+        # shorter than a single target segment can't produce a sensible
+        # multi-clip split anyway. This check is provenance-agnostic (it
+        # looks at the file's actual duration, not who/what produced it),
+        # so a short manually-dropped clip benefits identically - it no
+        # longer wastes time trying to force itself into 15-45s segments
+        # that don't fit.
+        short_clip_max_seconds = float(os.getenv('SHORT_CLIP_MAX_SECONDS', 90))
+        if 0 < analyzer.duration <= short_clip_max_seconds:
+            logger.info(
+                f"ℹ Source video is {analyzer.duration:.1f}s (<= {short_clip_max_seconds}s) - "
+                f"already short-form, skipping scene-detection/segmentation and mapping the "
+                f"whole file to a single clip instead of slicing it"
+            )
+            # engagement_score/viral_score are set to the maximum of their
+            # scales rather than measured: this clip already passed the
+            # sourcing agent's popularity/copyright gate as worth using in
+            # its entirety, so there's no "pick the best sub-segment"
+            # decision left to make - the whole file IS the segment. Left
+            # at the max also means a genuinely good already-viral clip
+            # isn't artificially blocked from the Reaction format's
+            # viral_score gate (agents/format_selector.py) just because
+            # this path skips real per-segment scoring.
+            segment = {
+                'index': 0,
+                'start_frame': 0,
+                'end_frame': analyzer.frame_count,
+                'start_time': 0.0,
+                'end_time': float(analyzer.duration),
+                'duration': float(analyzer.duration),
+                'scene_change_confidence': 1.0,
+                'engagement_score': 1.0,
+                'viral_score': 10.0,
+                'audio_features': {'energy': 0.5, 'loudness': 50.0, 'speech_presence': 0.5},
+            }
+            manifest = {
+                'video_path': str(video_path),
+                'duration': analyzer.duration,
+                'fps': analyzer.fps,
+                'resolution': {'width': analyzer.width, 'height': analyzer.height},
+                'clips': [segment],
+                'top_clip_indices': [0],
+                'top_clips': [segment],
+                'short_native': True,
+                'generated_at': datetime.now().isoformat()
+            }
+            logger.info("✅ Analysis complete (short-native path): 1 segment, 1 selected")
+            return manifest
+
         # Detect scene changes
         scene_changes = analyzer.detect_scene_changes(threshold=scene_threshold)
         

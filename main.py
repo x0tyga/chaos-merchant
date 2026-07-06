@@ -41,6 +41,7 @@ from agents.competitor_monitor import CompetitorMonitor
 from agents.analytics_feedback import run_analytics_feedback
 from agents.comment_mining import run_comment_mining
 from agents.thumbnail_research import run_thumbnail_research
+from agents.clip_sourcing import run_clip_sourcing
 from core.pipeline import run_pipeline
 from core.scheduler import initialize_scheduler
 
@@ -159,6 +160,25 @@ def main():
         lambda: generate_daily_trend_intelligence(),
         '07:00',
         quota_priority=10
+    )
+
+    # Register Clip Sourcing - twice daily (morning run right after Trend
+    # Intelligence, so it acts on same-day-fresh trends; evening run to
+    # catch same-day virality). Doesn't touch the YouTube Data API quota
+    # at all (yt-dlp scraping + PRAW, not the tracked API), so priority
+    # here only matters for jobs.mark_running()'s double-fire prevention,
+    # not quota gating.
+    scheduler.schedule_job(
+        'clip_sourcing_morning',
+        lambda: run_clip_sourcing(),
+        '07:30',
+        quota_priority=40
+    )
+    scheduler.schedule_job(
+        'clip_sourcing_evening',
+        lambda: run_clip_sourcing(),
+        '18:00',
+        quota_priority=40
     )
 
     # Register Competitor Monitor - every 3 hours, priority 50

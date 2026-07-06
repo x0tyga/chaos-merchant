@@ -799,6 +799,130 @@ class ChannelMemory:
             return {'by_format': {}, 'total_shorts': 0}
 
 
+class SourceRegistry:
+    """
+    Tracks every clip the autonomous sourcing agent (agents/clip_sourcing.py)
+    has ever seen, downloaded, or rejected - the mechanism that actually
+    guarantees a clip is never downloaded twice. Checked BEFORE any yt-dlp
+    probe/download call is made, not just checked against whatever
+    currently happens to be sitting in the input folder (which wouldn't
+    survive a process restart or a file later being moved/deleted
+    downstream by the pipeline) - independent of agents/watcher.py's
+    in-memory-only dedup, which has that exact gap.
+    """
+
+    def __init__(self, db_path: str = './data/chaos_merchant.db'):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_database()
+        logger.info(f"✓ SourceRegistry initialized: {self.db_path}")
+
+    def _init_database(self):
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sourced_clips (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_url TEXT NOT NULL UNIQUE,
+                    platform TEXT NOT NULL,
+                    title TEXT,
+                    popularity_signal REAL,
+                    duration_seconds REAL,
+                    file_path TEXT,
+                    status TEXT NOT NULL,
+                    rejection_reason TEXT,
+                    discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+            conn.close()
+            logger.info("✓ Source registry database schema initialized")
+        except Exception as e:
+            logger.error(f"❌ SourceRegistry database init failed: {e}")
+            raise
+
+    def is_known(self, source_url: str) -> bool:
+        """True if this URL has already been downloaded OR rejected - either way, it must
+        never be probed or downloaded again."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('SELECT 1 FROM sourced_clips WHERE source_url = ?', (source_url,))
+            found = cursor.fetchone() is not None
+            conn.close()
+            return found
+        except Exception as e:
+            logger.error(f"❌ SourceRegistry lookup failed: {e}")
+            # Fail OPEN (treat as unknown) rather than closed: a lookup
+            # error causing a duplicate download is wasteful but harmless,
+            # while failing closed would silently block ALL sourcing
+            # forever on a transient DB error - the worse outcome.
+            return False
+
+    def record_downloaded(self, source_url: str, platform: str, file_path: str,
+                          popularity_signal: float, duration_seconds: float,
+                          title: str = None) -> bool:
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO sourced_clips
+                (source_url, platform, title, popularity_signal, duration_seconds, file_path, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'downloaded')
+            ''', (source_url, platform, title, popularity_signal, duration_seconds, file_path))
+            conn.commit()
+            conn.close()
+            logger.info(f"✓ Recorded downloaded clip: {source_url}")
+            return True
+        except sqlite3.IntegrityError:
+            logger.warning(f"⚠ Source URL already registered (race or duplicate call): {source_url}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Failed to record downloaded clip: {e}")
+            return False
+
+    def record_rejected(self, source_url: str, platform: str, popularity_signal: float,
+                        rejection_reason: str, title: str = None) -> bool:
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO sourced_clips
+                (source_url, platform, title, popularity_signal, status, rejection_reason)
+                VALUES (?, ?, ?, ?, 'rejected', ?)
+            ''', (source_url, platform, title, popularity_signal, rejection_reason))
+            conn.commit()
+            conn.close()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        except Exception as e:
+            logger.error(f"❌ Failed to record rejected clip: {e}")
+            return False
+
+    def get_recent(self, limit: int = 50) -> List[Dict]:
+        """Most recently discovered clips (downloaded or rejected), for reporting/debugging."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT source_url, platform, title, popularity_signal, status, rejection_reason, discovered_at
+                FROM sourced_clips ORDER BY discovered_at DESC LIMIT ?
+            ''', (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [
+                {'source_url': r[0], 'platform': r[1], 'title': r[2], 'popularity_signal': r[3],
+                 'status': r[4], 'rejection_reason': r[5], 'discovered_at': r[6]}
+                for r in rows
+            ]
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch recent sourced clips: {e}")
+            return []
+
+
 def initialize_memory_system() -> Tuple[HookLibrary, ChannelMemory]:
     """Initialize both memory systems with backup"""
     logger.info("=" * 70)
