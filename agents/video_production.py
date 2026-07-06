@@ -125,14 +125,66 @@ class CaptionSynchronizer:
     CAPTION_COLOR = 'white'
     CAPTION_BG_COLOR = (0, 0, 0)
     SAFE_MARGIN = 60
+    # Caption vertical anchor: 80% down from the top of the frame, but never
+    # closer than MIN_BOTTOM_MARGIN px to the bottom edge - see render_captions().
+    CAPTION_TOP_RATIO = 0.80
+    MIN_BOTTOM_MARGIN = 80
+
+    # moviepy 2.x's TextClip renders text via Pillow directly (it no longer
+    # shells out to ImageMagick the way moviepy 1.x did) - but unlike 1.x,
+    # it has NO built-in default font: a missing/invalid `font` path makes
+    # every single TextClip construction raise. These are checked in order
+    # only when CAPTION_FONT_PATH isn't set or doesn't exist; the DejaVu
+    # path is the same one BrandingOverlay already relies on existing.
+    FALLBACK_FONT_CANDIDATES = [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+        '/System/Library/Fonts/Supplemental/Arial.ttf',
+        '/Library/Fonts/Arial Bold.ttf',
+    ]
 
     def __init__(self, script: str):
         self.script = script
-        # NOTE: Current implementation uses system default font for compatibility
-        # BEFORE CHANNEL GOES LIVE: Replace with Bebas Neue or custom gaming-style font
-        # Set CAPTION_FONT_PATH in .env to override (e.g., /path/to/BebasNeue-Regular.ttf)
-        # Gaming fonts improve brand identity and visual appeal on YouTube Shorts
-        self.font_path = os.getenv('CAPTION_FONT_PATH', None)
+        # Gaming fonts improve brand identity - set CAPTION_FONT_PATH in .env
+        # to a real .ttf/.otf to override (e.g. Bebas Neue).
+        self.font_path = self._resolve_font_path(os.getenv('CAPTION_FONT_PATH', None))
+        # (y_top, y_bottom) band actually used for the most recent
+        # render_captions() call, in exported-frame pixel coordinates -
+        # consumed by verify_captions_in_export() so post-export
+        # verification checks the region captions were really placed in,
+        # not a guessed one.
+        self.last_caption_band = None
+
+    def _resolve_font_path(self, env_font: str) -> str:
+        """
+        Resolve a real, existing font file to hand to TextClip. moviepy 2.x
+        has no fallback of its own - if this returns None, render_captions()
+        must refuse to attempt rendering rather than fail silently N times
+        in a row (once per caption segment) with no aggregate signal.
+        """
+        if env_font:
+            if Path(env_font).exists():
+                logger.info(f"✓ Using caption font from CAPTION_FONT_PATH: {env_font}")
+                return env_font
+            logger.warning(
+                f"⚠ CAPTION_FONT_PATH={env_font} does not exist on disk - "
+                f"falling back to auto-detected system fonts"
+            )
+
+        for candidate in self.FALLBACK_FONT_CANDIDATES:
+            if Path(candidate).exists():
+                logger.info(f"✓ Using fallback caption font: {candidate}")
+                return candidate
+
+        logger.error(
+            "❌ No usable font found for burned-in captions (checked CAPTION_FONT_PATH "
+            f"and {len(self.FALLBACK_FONT_CANDIDATES)} known system font paths). moviepy "
+            "2.x's TextClip requires an explicit font file and has no built-in default - "
+            "every caption will fail to render until a valid font path is available. "
+            "Set CAPTION_FONT_PATH in .env to a real .ttf/.otf file."
+        )
+        return None
 
     def generate_caption_timeline(self, voiceover_duration: float) -> List[Tuple[float, float, str]]:
         """
@@ -168,7 +220,27 @@ class CaptionSynchronizer:
             logger.info("⚠ No captions to render")
             return video_clip
 
+        if not self.font_path:
+            # _resolve_font_path() already logged the loud, actionable
+            # error at construction time - looping through every segment
+            # here would just repeat the identical failure N times with
+            # no new information, burying the one signal that matters.
+            logger.error(
+                f"❌ Skipping all {len(caption_timeline)} caption segments - no usable "
+                f"font available (see error above). Short will export with NO captions."
+            )
+            return video_clip
+
         caption_clips = []
+        rendered_bands = []  # (y_top, y_bottom) per successfully rendered segment
+
+        # Anchor point: 80% down from the top of the frame, clamped so the
+        # caption's own height never pushes its bottom edge closer than
+        # MIN_BOTTOM_MARGIN px to the bottom of the frame. Replaces the old
+        # hardcoded `video_clip.h - SAFE_MARGIN - 100`, which put captions
+        # at a fixed 160px from the bottom regardless of frame height and
+        # regressed to being cut off on tall vertical (1080x1920) exports.
+        target_y = int(video_clip.h * self.CAPTION_TOP_RATIO)
 
         for start_time, end_time, text in caption_timeline:
             try:
@@ -176,43 +248,107 @@ class CaptionSynchronizer:
 
                 text_clip_kwargs = {
                     'text': text,
+                    'font': self.font_path,
                     'font_size': self.CAPTION_FONT_SIZE,
                     'color': self.CAPTION_COLOR,
                     'method': 'caption',
                     'size': (video_clip.w - 2 * self.SAFE_MARGIN, None)
                 }
 
-                if self.font_path and Path(self.font_path).exists():
-                    text_clip_kwargs['font'] = self.font_path
-
                 text_clip = TextClip(**text_clip_kwargs)
-
                 text_clip = text_clip.with_duration(duration).with_start(start_time)
-                text_clip = text_clip.with_position(('center', video_clip.h - self.SAFE_MARGIN - 100))
 
+                max_y = video_clip.h - self.MIN_BOTTOM_MARGIN - text_clip.h
+                y_pos = max(0, min(target_y, max_y))
+                text_clip = text_clip.with_position(('center', y_pos))
+
+                rendered_bands.append((y_pos, y_pos + text_clip.h))
                 caption_clips.append(text_clip)
 
             except Exception:
                 # logger.exception captures the full traceback, not just
-                # str(e) - the difference between "ImageMagick policy denied
-                # text operations" being visible vs. silently discarded.
+                # str(e) - the difference between a font/rendering issue
+                # being visible vs. silently discarded.
                 logger.exception("⚠ Caption rendering failed for segment")
                 continue
 
-        if caption_clips:
-            # Explicit with_duration() rather than relying on
-            # CompositeVideoClip's implicit max-end-time inference - the
-            # base video_clip should already determine this correctly
-            # since it starts at t=0 with no trim, but being explicit
-            # removes any ambiguity given how much this session's bugs
-            # have hinged on exactly this kind of implicit duration
-            # behavior in moviepy composites.
-            composite = CompositeVideoClip([video_clip] + caption_clips).with_duration(video_clip.duration)
-            logger.info(f"✓ Rendered {len(caption_clips)} caption overlays")
-            logger.info(f"📊 Captions: duration in {video_clip.duration:.1f}s -> out {composite.duration:.1f}s")
-            return composite
+        failed_count = len(caption_timeline) - len(caption_clips)
+        if not caption_clips:
+            logger.error(
+                f"❌ ALL {len(caption_timeline)} caption segments failed to render - "
+                f"short will export with NO captions at all (see exceptions above)"
+            )
+            return video_clip
+        if failed_count:
+            logger.warning(
+                f"⚠ {failed_count} of {len(caption_timeline)} caption segments failed to "
+                f"render - short will ship with partial captions"
+            )
 
-        return video_clip
+        # Store the union band across all rendered segments so a post-export
+        # verification pass knows exactly where to look for caption pixels,
+        # instead of guessing at a region.
+        self.last_caption_band = (
+            min(b[0] for b in rendered_bands),
+            max(b[1] for b in rendered_bands)
+        )
+
+        # Explicit with_duration() rather than relying on
+        # CompositeVideoClip's implicit max-end-time inference - the
+        # base video_clip should already determine this correctly
+        # since it starts at t=0 with no trim, but being explicit
+        # removes any ambiguity given how much this session's bugs
+        # have hinged on exactly this kind of implicit duration
+        # behavior in moviepy composites.
+        composite = CompositeVideoClip([video_clip] + caption_clips).with_duration(video_clip.duration)
+        logger.info(f"✓ Rendered {len(caption_clips)} caption overlays")
+        logger.info(f"📊 Captions: duration in {video_clip.duration:.1f}s -> out {composite.duration:.1f}s")
+        return composite
+
+    @staticmethod
+    def verify_captions_in_export(export_path: str, caption_timeline: List[Tuple[float, float, str]],
+                                   caption_band: Tuple[int, int], max_samples: int = 5) -> bool:
+        """
+        Post-export sanity check: reopen the exported MP4 and sample frames
+        at a handful of caption-active timestamps, checking for bright
+        (caption-colored) pixels inside the band captions were placed in.
+        Mirrors the "verify the artifact, don't trust the writer" pattern
+        VideoExporter.export_mp4() already uses for its atomic-write fix -
+        render_captions() succeeding in-process doesn't guarantee the
+        pixels survived compositing/encoding into the final file.
+        """
+        if not caption_timeline or not caption_band:
+            return True
+
+        y0, y1 = caption_band
+        clip = None
+        try:
+            clip = VideoFileClip(export_path)
+            step = max(1, len(caption_timeline) // max_samples)
+            sample_segments = caption_timeline[::step][:max_samples]
+
+            for start, end, _ in sample_segments:
+                mid = (start + end) / 2
+                if mid >= clip.duration:
+                    continue
+                frame = clip.get_frame(mid)
+                band = frame[max(0, int(y0)):min(frame.shape[0], int(y1)), :, :]
+                if band.size == 0:
+                    continue
+                brightness = band.mean(axis=2)
+                # CAPTION_COLOR is white text on video content behind it -
+                # a nontrivial fraction of near-white pixels in the caption
+                # band is the signal that text actually got drawn there.
+                if (brightness > 180).mean() > 0.01:
+                    return True
+
+            return False
+        except Exception:
+            logger.exception(f"⚠ Could not verify caption presence in exported video: {export_path}")
+            return False
+        finally:
+            if clip is not None:
+                clip.close()
 
 
 class BackgroundMusicLibrary:
@@ -995,6 +1131,20 @@ class VideoProducer:
 
             is_valid = exporter.validate_output(export_path)
 
+            # Don't trust that captions compositing succeeded in-process -
+            # confirm the pixels actually made it into the finished MP4.
+            captions_verified = True
+            if captions_applied:
+                captions_verified = CaptionSynchronizer.verify_captions_in_export(
+                    export_path, caption_timeline, caption_sync.last_caption_band
+                )
+                if not captions_verified:
+                    logger.error(
+                        f"❌ {output_name}: captions were composited in-process but no caption "
+                        f"pixels were detected in the exported MP4 - they were likely lost "
+                        f"during compositing/export, not just a rendering issue upstream"
+                    )
+
             try:
                 extractor.close()
                 reframed_clip.close()
@@ -1010,7 +1160,7 @@ class VideoProducer:
             elapsed = (datetime.now() - start_time).total_seconds()
 
             applied_features = []
-            if captions_applied:
+            if captions_applied and captions_verified:
                 applied_features.append('captions')
             if ducking_applied:
                 applied_features.append('audio_ducking')
@@ -1031,7 +1181,8 @@ class VideoProducer:
                     # checks above), not what was merely attempted - a step
                     # can silently no-op on failure without killing the short.
                     'features': applied_features,
-                    'features_requested': ['captions', 'audio_ducking', 'color_grading', 'branding']
+                    'features_requested': ['captions', 'audio_ducking', 'color_grading', 'branding'],
+                    'captions_verified': captions_verified
                 }
             else:
                 return {
@@ -1041,7 +1192,8 @@ class VideoProducer:
                     'error': 'Output validation failed',
                     'processing_time': elapsed,
                     'features': applied_features,
-                    'features_requested': ['captions', 'audio_ducking', 'color_grading', 'branding']
+                    'features_requested': ['captions', 'audio_ducking', 'color_grading', 'branding'],
+                    'captions_verified': captions_verified
                 }
 
         except Exception as e:
