@@ -16,6 +16,7 @@
     <a href="{{ url_for('audit_page') }}" class="{{ 'active' if request.endpoint in ('audit_page', 'audit_detail_route') }}">Audit</a>
     <a href="{{ url_for('analytics_page') }}" class="{{ 'active' if request.endpoint == 'analytics_page' }}">Analytics</a>
     <a href="{{ url_for('trends_page') }}" class="{{ 'active' if request.endpoint == 'trends_page' }}">Trends</a>
+    <a href="{{ url_for('sources_page') }}" class="{{ 'active' if request.endpoint == 'sources_page' }}">Sources</a>
     <a href="{{ url_for('research_page') }}" class="{{ 'active' if request.endpoint == 'research_page' }}">Research</a>
     <a href="{{ url_for('settings_page') }}" class="{{ 'active' if request.endpoint in ('settings_page', 'edit_prompt_route') }}">Settings</a>
     <a href="{{ url_for('logs_page') }}" class="{{ 'active' if request.endpoint == 'logs_page' }}">Logs</a>

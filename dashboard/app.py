@@ -147,6 +147,15 @@ def add_competitor_route():
     return redirect(url_for('trends_page'))
 
 
+@app.route('/sources')
+def sources_page():
+    return render_template(
+        'sources.html',
+        source_config=data.get_source_config(),
+        activity=data.get_sourcing_activity(limit=30)
+    )
+
+
 @app.route('/research')
 def research_page():
     return render_template(

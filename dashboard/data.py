@@ -301,6 +301,42 @@ def add_competitor(handle_or_url: str, category: str = 'gaming') -> Optional[Dic
 
 
 # ---------------------------------------------------------------------------
+# Sources - autonomous clip sourcing config (agents/clip_sourcing.py) and
+# recent sourcing activity (downloaded/rejected clips)
+# ---------------------------------------------------------------------------
+
+def get_source_config() -> Dict:
+    """
+    Reads the three sourcing config files for the dashboard Sources tab.
+    Defaults here match agents/clip_sourcing.py's own auto-create defaults
+    exactly, so viewing this page before the sourcing agent has ever run
+    (which is when these files get auto-created on disk) still shows the
+    real starting state instead of an empty/misleading page.
+    """
+    from agents.clip_sourcing import (
+        SUBREDDITS_CONFIG_PATH, CHANNELS_CONFIG_PATH, BLOCKLIST_CONFIG_PATH, DEFAULT_SUBREDDITS
+    )
+    subreddits_cfg = _read_json(SUBREDDITS_CONFIG_PATH, {'subreddits': DEFAULT_SUBREDDITS})
+    channels_cfg = _read_json(CHANNELS_CONFIG_PATH, {'channels': []})
+    blocklist_cfg = _read_json(BLOCKLIST_CONFIG_PATH, {'blocked_uploaders': []})
+    return {
+        'subreddits': subreddits_cfg.get('subreddits', []),
+        'channels': channels_cfg.get('channels', []),
+        'blocked_uploaders': blocklist_cfg.get('blocked_uploaders', []),
+    }
+
+
+def get_sourcing_activity(limit: int = 30) -> List[Dict]:
+    """Recent sourced_clips rows (downloaded/rejected) from SourceRegistry."""
+    try:
+        from core.memory import SourceRegistry
+        return SourceRegistry(str(DB_PATH)).get_recent(limit=limit)
+    except Exception as e:
+        logger.warning(f"⚠ Could not read sourcing activity: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Research - thumbnail research, comment insights, content gaps
 # ---------------------------------------------------------------------------
 

@@ -81,9 +81,14 @@ def _load_channels() -> List[str]:
         CHANNELS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         default = {
             '_note': (
-                'Curated YouTube channel URLs to pull recent uploads from for sourcing '
-                '(e.g. "https://www.youtube.com/@SomeChannel"). Empty by default - add '
-                'real channels here or via a future dashboard control.'
+                'STARTS EMPTY ON PURPOSE - this is not a bug. Curated YouTube channel '
+                'URLs to pull recent uploads from for sourcing (e.g. '
+                '"https://www.youtube.com/@SomeChannel"). Until you add at least one '
+                'channel here, YouTube\'s curated-channel sourcing mode produces zero '
+                'candidates every run - trending/search-query sourcing (fed from the '
+                'daily trend intelligence brief) still runs independently and is not '
+                'affected. Add channels here directly, or via the dashboard\'s Sources '
+                'tab.'
             ),
             'channels': []
         }
@@ -426,9 +431,19 @@ class ClipSourcingAgent:
         logger.info(f"🔎 CLIP SOURCING{' (DRY RUN - nothing will be downloaded)' if dry_run else ''}")
         logger.info("=" * 70)
 
+        channels = _load_channels()
+        if not channels:
+            logger.warning(
+                "⚠ YouTube curated-channel sourcing is configured with ZERO channels - "
+                "this starts empty on purpose (not a bug), but it means the curated-channel "
+                "mode will contribute 0 candidates every run until you add at least one to "
+                f"{CHANNELS_CONFIG_PATH} (or via the dashboard's Sources tab). "
+                "Trending/search-query sourcing still runs independently below."
+            )
+
         candidates = []
         candidates.extend(self.reddit_fetcher.fetch_candidates())
-        candidates.extend(self.youtube_fetcher.fetch_channel_candidates(_load_channels()))
+        candidates.extend(self.youtube_fetcher.fetch_channel_candidates(channels))
         candidates.extend(self.youtube_fetcher.fetch_search_candidates(youtube_search_queries or _load_trending_search_queries()))
 
         logger.info(f"✓ {len(candidates)} raw candidate(s) discovered across all sources")

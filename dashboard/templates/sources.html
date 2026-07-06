@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Sources{% endblock %}
+{% block content %}
+<h1>Sources</h1>
+<p class="muted">Autonomous clip sourcing (agents/clip_sourcing.py) - finds and downloads its own footage from Reddit and YouTube on a schedule, so the input folder never needs a manual video drop.</p>
+
+<div class="grid grid-2">
+  <div class="card">
+    <h2>Reddit Subreddits</h2>
+    <p class="muted">Scanned for actual video submissions - config/source_subreddits.json</p>
+    {% if source_config.subreddits %}
+      <table>
+        <thead><tr><th>Subreddit</th></tr></thead>
+        <tbody>
+        {% for s in source_config.subreddits %}
+          <tr><td>r/{{ s }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty-state">No subreddits configured.</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>YouTube Curated Channels</h2>
+    <p class="muted">Recent uploads pulled for sourcing - config/source_channels.json</p>
+    {% if source_config.channels %}
+      <table>
+        <thead><tr><th>Channel</th></tr></thead>
+        <tbody>
+        {% for c in source_config.channels %}
+          <tr><td>{{ c }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="flash flash-error">
+        <strong>Starts empty on purpose - this is not a bug.</strong>
+        No YouTube channels are configured yet, so curated-channel sourcing
+        contributes <strong>zero candidates every run</strong> until you add
+        at least one. Trending/search-query sourcing (fed from the daily
+        Trend Intelligence brief) still runs independently and is
+        <strong>not</strong> affected by this being empty.
+        <br><br>
+        Add channel URLs (e.g. <code>https://www.youtube.com/@SomeChannel</code>)
+        directly to <code>config/source_channels.json</code> to enable this
+        source.
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Known-Risk Blocklist</h2>
+  <p class="muted">Uploaders never sourced regardless of popularity - config/source_blocklist.json</p>
+  {% if source_config.blocked_uploaders %}
+    <table>
+      <thead><tr><th>Uploader</th></tr></thead>
+      <tbody>
+      {% for u in source_config.blocked_uploaders %}
+        <tr><td>{{ u }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">Empty by default - add uploaders here as you learn which sources are risky.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Recent Sourcing Activity</h2>
+  <p class="muted">Every clip the sourcing agent has seen, downloaded, or rejected - and why.</p>
+  {% if activity %}
+    <table>
+      <thead><tr><th>Status</th><th>Platform</th><th>Title</th><th>Popularity</th><th>Reason</th><th>When</th></tr></thead>
+      <tbody>
+      {% for a in activity %}
+        <tr>
+          <td>{{ '✓' if a.status == 'downloaded' else '⊗' }} {{ a.status }}</td>
+          <td class="muted">{{ a.platform }}</td>
+          <td>{{ (a.title or a.source_url)[:60] }}</td>
+          <td>{{ a.popularity_signal }}</td>
+          <td class="muted">{{ a.rejection_reason or '' }}</td>
+          <td class="muted">{{ a.discovered_at }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">No sourcing activity yet - runs twice daily (07:30, 18:00), or trigger manually: python -m agents.clip_sourcing --dry-run</div>
+  {% endif %}
+</div>
+{% endblock %}
