@@ -3,10 +3,10 @@
 **Current Date:** 2026-07-06
 **Branch:** `claude/session-handoff-review-bawvji` (this session's designated branch; the prior session's `claude/github-abundant-aho-c2btu7` branch/main-sync claim could not be verified against `origin/main`, which is still at the repo's initial commit - see note below)
 **Current model:** `claude-sonnet-5`
-**Status:** First real-hardware run happened and produced broken output (1 MP4 instead of 7, ~7s unformatted video, no captions/effects/branding). Working through a 5-bug punch list from that run, one at a time, with a debrief + individual push after each fix. Bugs 1, 2, 3, and 4 fixed. Bug 5 still outstanding.
-**Next Action:** Resume Bug 5 (fewer Shorts produced than clips detected) - see "BUGS STILL OUTSTANDING" below.
+**Status:** First real-hardware run happened and produced broken output (1 MP4 instead of 7, ~7s unformatted video, no captions/effects/branding). Working through a 5-bug punch list from that run, one at a time, with a debrief + individual push after each fix. **All 5 bugs are now fixed.**
+**Next Action:** the 5-bug punch list is complete. Next real milestone is another clean hardware run to confirm all 5 fixes actually resolve what was seen in production (see "Assets needed" and Bug 4's caveat below). After that, the two queued DIRECTION DECISIONS (format pivot, autonomous sourcing) are next, but only once the user explicitly asks to start scoping them.
 
-**Branch/remote note:** `origin/main` and `claude/session-handoff-review-bawvji` are confirmed in sync as of this update (`main` fast-forwarded to this branch's tip after Bug 3; Bug 4 is committed on this branch and should be pushed to `main` the same way once reviewed).
+**Branch/remote note:** `origin/main` and `claude/session-handoff-review-bawvji` are kept in sync throughout this session (fast-forward pushes after each bug). Bug 5 is committed on this branch and should be pushed to `main` the same way once reviewed.
 
 ---
 
@@ -54,6 +54,24 @@ Verified via a fake-object harness (moviepy/numpy stubbed enough to import the m
 Change is in `agents/video_production.py` only (`ClipExtractor` and the audio-prep/pre-export logging in `produce_single_short()`).
 **Caveat:** the black-frame-tail detector is a heuristic based on sampled frame brightness, not a certainty - it's the most plausible mechanism given the exact symptom described ("real content for ~30s then black and silent for the rest"), but it hasn't been confirmed against the actual source file from the original broken run (that file wasn't available in this environment). The new detailed duration logging will make it obvious on the next real hardware run whether this was the actual cause: if the logs show `clip`/`final_audio`/`final video` durations all matching and equal to the *original* clip duration (not truncated) and the exported file still goes black partway through, that would point to a decode issue the sampling heuristic didn't catch, rather than a duration-arithmetic bug - worth a follow-up look if so.
 
+**Bug 5 - Output count: fewer Shorts produced than clips detected.**
+Confirmed `clip_intelligence.py`'s clip detection/selection is not the culprit (`select_top_clips()` correctly returns all N detected segments when fewer than 7 exist - "found 3 clips" correctly produces a 3-long `top_clip_indices`). The loss happens entirely downstream, across three compounding issues:
+1. **The big one:** `core/pipeline.py`'s Step 6 (Quality Control) handling raised an exception and aborted the ENTIRE pipeline run whenever `qc_result['status'] == 'error'` - which is the batch's *worst* per-clip result, not "everything is broken." If even 1 of 3 clips had any QC issue, **Step 7 (Output Packaging) never ran for any of the 3 clips** - the other two clips' videos existed on disk in `output_dir` from Step 4, but never got organized into the deliverable batch folder, which looks exactly like "fewer shorts than clips detected" (or zero, depending on what the user was counting). This directly contradicts CLAUDE.md's own documented QC design (route to a manual_review *queue*, implying packaged output that needs review - not "nothing gets packaged"). The error log line itself was also silently broken: it read `qc_result.get('errors')`, a key that never existed at that nesting level (the real errors are nested at `qc_result['qc_result']['issues']['errors']`), so it always logged `[]` regardless of what actually failed.
+2. QC's content-similarity check only ever compared **one** title against channel history - `seo_manifest.get('best_title')`, which `pipeline.py` only ever populates from the *first successful clip's* SEO result. A title collision on clip 1 alone could flag the entire batch's uniqueness check while clips 2 and 3's genuinely distinct topics were never evaluated on their own merits at all - a real "QC failing for a fixable/wrong reason," exactly what was asked to be checked for.
+3. QC's caption-presence detector hardcoded its frame-scan region to the **bottom 15%** of the frame - correct for the *old* caption position, but Bug 3 (this session) moved captions up to 80% down from the top with an 80px bottom margin, which can sit entirely above that old 15% band. Bug 3's fix had silently turned into a *new* QC false positive: genuinely-captioned videos reporting "no captions detected."
+
+Fix:
+1. `core/pipeline.py`: QC failures are now logged loudly (reading the real nested error path) and per-clip QC failure files are written, but the batch **always proceeds to packaging** - a batch with QC issues gets packaged with `routing=manual_review` instead of not existing at all.
+2. `quality_control.py`: content similarity now runs once **per clip** against that clip's own `per_clip` SEO result, not the batch's first-successful-clip title.
+3. `quality_control.py`: the caption-detection region now reads `CaptionSynchronizer.CAPTION_TOP_RATIO` directly (imported from `video_production.py`) instead of a second, independently-hardcoded guess, so the two can't silently drift apart again.
+4. Throughout `video_production.py`'s `produce_single_short()`/`produce_all_shorts()`: every step now logs with an explicit `[Short N/M]` tag (previously ambiguous when multiple clips' logs interleaved in the same run), the hardcoded `/7` in per-short logs is now the real batch size, and **every failure - production or QC - now writes a dedicated, human-readable error file directly into the output folder** (`video_{stem}_{NNN}_ERROR.txt` for production failures, `video_{stem}_{NNN}_QC_ERROR.txt` for QC failures) stating the short number, clip index, failed step, and exact reason, instead of a clip just disappearing with the explanation buried in a log stream.
+5. QC's per-video/per-caption/per-similarity results are now keyed by the **real** `short_number` (via `video_manifest['short_results']`) rather than a positional index that silently misattributes results to the wrong clip once any clip upstream has already failed production.
+6. `output_packaging.py`'s similarity-check aggregation updated to summarize the new per-clip list (worst-result-wins, like the other per-video aggregations) instead of reading only the first entry.
+
+On the "adjust thresholds vs. fix the underlying issue" question specifically: the caption-region and content-similarity-scope problems were fixed at the root (they were flat-out wrong, not just strict), not by loosening thresholds. `AUDIO_SYNC_TOLERANCE` (±0.3s) and duration bounds (15-45s) were reviewed and left alone - nothing found suggests they're miscalibrated; audio/video duration should already match to well under a frame's width given Bug 4's reconciliation work.
+Verified via a fake-object harness: `VideoProducer._write_short_error_file` produces a correctly-formatted file with short number/clip index/step/reason; `quality_control.py` correctly imports and uses the live `CaptionSynchronizer.CAPTION_TOP_RATIO` constant; `Pipeline._write_qc_failure_files` writes one QC error file per genuinely-failing short (combining video + caption + similarity reasons) and none for a short that passed everything.
+Change spans `agents/video_production.py`, `agents/quality_control.py`, `agents/output_packaging.py`, and `core/pipeline.py`.
+
 ### Assets needed before these can be tested for real
 
 **`assets/music/` currently contains only a README - no actual audio files.** Bugs 1 and 2 cannot be meaningfully tested on real hardware until royalty-free music tracks are actually dropped into that folder (supported formats: `.mp3/.wav/.m4a/.aac/.ogg/.flac`). Without any tracks present, `BackgroundMusicLibrary.load_for_short()` degrades to `None` and the pipeline runs voiceover-only - which will falsely look like Bug 1 is "fixed" (no source audio, but also no music) without actually exercising the ducking/base-level logic in Bug 2 at all.
@@ -62,11 +80,7 @@ Change is in `agents/video_production.py` only (`ClipExtractor` and the audio-pr
 
 ## BUGS STILL OUTSTANDING
 
-Work resumes here, one at a time, with a debrief + individual push after each.
-
-### Bug 5 - Output count: fewer Shorts produced than clips detected (up next)
-
-Root cause not yet investigated. Per the original bug report: the per-clip loop appears to complete, but individual clips may be failing silently without clear logging, so fewer than the expected number of Shorts come out the other end with no visible explanation. Needs detailed per-clip logging added (clip number, current step, pass/fail, and why on failure) and any silent-failure paths found and fixed, so every clip either produces a Short or produces a clear, explanatory error in the logs/manifest.
+None - all 5 bugs from the original punch list are fixed as of this update. See "Bugs fixed today" above for Bug 5's debrief (the most recently closed). Next step is a clean hardware run to confirm all 5 fixes actually resolve what was seen in production, not just in mocks/fake-object harnesses - see the caveats under Bug 4 and Bug 5 above for what specifically to watch for in that run's logs.
 
 ---
 
@@ -99,14 +113,13 @@ No design work has been done yet on sourcing criteria (what makes a video worth 
 
 1. Read this HANDOFF.md top to bottom - it reflects the exact current state as of the interrupt that triggered this update.
 2. `git log --oneline -15` and `git status` to confirm exactly which fixes have landed, and on which branch/remote - see the "Branch/remote note" at the top; don't assume `main` is in sync without checking.
-3. If the user hasn't given the go-ahead for Bug 5 yet, don't start it - the standing process for this bug list is one bug at a time, debrief, individual push, then wait for explicit go-ahead.
-4. Once all 5 bugs are fixed and the user has real music files in `assets/music/`, the next real milestone is another clean hardware run to confirm Bugs 1-5 actually resolved what was seen in production, not just in mocks - pay particular attention to Bug 4's new duration logging, since its fix was a best-effort heuristic that couldn't be validated against the original broken source file (see the caveat under Bug 4 above).
-5. The format-template pivot and autonomous clip-sourcing decisions are queued behind the bug list - don't start scoping either until the user explicitly asks for it.
+3. All 5 bugs are fixed. Once the user has real music files in `assets/music/`, the next real milestone is another clean hardware run to confirm Bugs 1-5 actually resolved what was seen in production, not just in mocks - pay particular attention to: Bug 4's new duration logging (its fix was a best-effort heuristic that couldn't be validated against the original broken source file - see its caveat above), and Bug 5's per-clip `*_ERROR.txt`/`*_QC_ERROR.txt` files (confirm they actually appear in `output_dir` for any clip that doesn't make it, and that a QC issue on one clip no longer prevents the others from being packaged).
+4. The format-template pivot and autonomous clip-sourcing decisions are queued behind the bug list - don't start scoping either until the user explicitly asks for it.
 
 ---
 
 ## DOCUMENT META
 
 **Document created:** 2026-07-02
-**Last updated:** 2026-07-06, mid-bugfix-session (Bug 4 of a 5-bug punch list fixed and committed; Bug 5 next)
-**Status:** Active bug-fixing session in progress. Bugs 1-4 fixed, Bug 5 outstanding, two direction decisions (format pivot, autonomous sourcing) recorded but not yet scoped or implemented.
+**Last updated:** 2026-07-06, bugfix session complete (Bug 5, the last of the 5-bug punch list, fixed and committed)
+**Status:** All 5 bugs from the real-hardware-run punch list are fixed. Next milestone: a clean hardware re-run to confirm the fixes hold outside fake-object test harnesses. Two direction decisions (format pivot, autonomous sourcing) recorded but not yet scoped or implemented.
