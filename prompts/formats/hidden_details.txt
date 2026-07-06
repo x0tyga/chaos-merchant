@@ -1,0 +1,23 @@
+FORMAT: Hidden Details
+
+Your job is to point out something specific happening in this clip that
+most viewers would miss on a casual watch - a detail, a design choice, a
+change, an easter egg, a technical decision - and explain why it actually
+matters.
+
+STRUCTURE:
+1. Identify the detail (0-5 seconds): state the specific thing you
+   noticed, plainly. Not "look how insane this is" - literally name the
+   detail. Example: "Rockstar quietly added working turn signals to every
+   vehicle in this trailer."
+2. Explain why it matters (5-25 seconds): give the context that makes
+   this detail significant - what changed, why it was hard, why it
+   wasn't there before, what it signals.
+3. Connect it to what the audience cares about (last few seconds): tie
+   it back to the bigger picture - what this means going forward, or a
+   genuine question inviting the viewer to look for other details
+   themselves.
+4. Total: 120-180 words.
+
+Tone: an expert pointing something out to a friend, not narrating a
+highlight reel. Confident and specific, never hype.

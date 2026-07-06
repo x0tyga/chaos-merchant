@@ -245,10 +245,19 @@ class Pipeline:
             thumb_for_short = thumbnails[short_number] if short_number < len(thumbnails) else {}
             thumbnail_style = thumb_for_short.get('status', 'unknown')
 
+            # format_used (the model's own echo of which format it actually
+            # wrote in - see script_voiceover.py's generate_script_for_clip())
+            # is preferred over format_type (what was requested), since a
+            # mismatch there is exactly the signal this session's format
+            # pivot needs to catch; falls back to format_type if the model
+            # didn't echo one back (e.g. an older/legacy-prompt run).
+            format_used = clip_voiceover.get('format_used') or clip_voiceover.get('format_type')
+
             if channel_memory.add_short(
                 title=title, topic=topic, source_video=str(self.video_path),
                 script_summary=script_summary, hook_text=hook_text,
-                thumbnail_style=thumbnail_style, caption_style=caption_style
+                thumbnail_style=thumbnail_style, caption_style=caption_style,
+                format_used=format_used
             ):
                 logged += 1
 
@@ -363,7 +372,8 @@ class Pipeline:
             logger.info("Step 2/7: Script Generation + Voiceover (per-clip)")
             self.log_step(PipelineStep.SCRIPT_VOICEOVER, 'in_progress')
 
-            from agents.script_voiceover import generate_voiceover_for_clip
+            from agents.script_voiceover import generate_voiceover_for_clip, get_clip_description
+            from agents.format_selector import select_format_for_clip
 
             trending_topics = self._load_trending_topics()
             channel_history = self._load_channel_history()
@@ -371,10 +381,41 @@ class Pipeline:
             top_clip_indices = clip_manifest.get('top_clip_indices', [])
             clips = clip_manifest.get('clips', [])
 
+            # Lightweight (metadata-only, no vision call) summary of every
+            # selected clip in this batch - passed as 'other_clips_context'
+            # to whichever clips end up scripted as Ranking/Comparison, so
+            # those formats can reference the rest of the batch ("beating
+            # out #4...") without needing a full vision description of
+            # clips this iteration hasn't reached yet.
+            batch_clip_summaries = [
+                {
+                    'clip_index': i,
+                    'duration': round(clips[clip_idx].get('duration', 0), 1) if clip_idx < len(clips) else 0,
+                    'engagement_score': round(clips[clip_idx].get('engagement_score', 0), 2) if clip_idx < len(clips) else 0,
+                }
+                for i, clip_idx in enumerate(top_clip_indices)
+            ]
+
             voiceover_results = []
             for i, clip_idx in enumerate(top_clip_indices):
                 clip_data = clips[clip_idx] if clip_idx < len(clips) else {}
                 try:
+                    # Content description is needed BEFORE format selection
+                    # (the selector judges partly on what's actually on
+                    # screen) - computed once here and passed through so
+                    # generate_voiceover_for_clip() doesn't re-run the same
+                    # vision call a second time.
+                    clip_description = get_clip_description(clip_data, i, str(self.video_path))
+
+                    format_type, format_rationale = select_format_for_clip(
+                        clip_data, clip_description=clip_description, trending_topics=trending_topics
+                    )
+                    logger.info(f"✓ Clip {i + 1}/{len(top_clip_indices)}: format '{format_type}' ({format_rationale})")
+
+                    other_clips_context = None
+                    if format_type in ('ranking', 'comparison'):
+                        other_clips_context = [s for s in batch_clip_summaries if s['clip_index'] != i]
+
                     vr = generate_voiceover_for_clip(
                         clip_data, i,
                         trending_topics=trending_topics,
@@ -383,7 +424,10 @@ class Pipeline:
                         # this clip's actual segment and react to what is
                         # literally on screen, instead of generating blind
                         # from engagement scores.
-                        source_video_path=str(self.video_path)
+                        source_video_path=str(self.video_path),
+                        clip_description=clip_description,
+                        format_type=format_type,
+                        other_clips_context=other_clips_context
                     )
                     voiceover_results.append(vr)
                 except Exception as e:

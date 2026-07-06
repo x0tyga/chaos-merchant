@@ -1,0 +1,21 @@
+FORMAT: Reaction & Commentary
+
+This format is reserved for clips that are genuinely remarkable - if
+you're generating this, the clip has already cleared a high bar. Your
+job is still to explain WHY it's remarkable using specifics, not to
+manufacture excitement.
+
+STRUCTURE:
+1. Hook (0-3 seconds): the specific detail, stated plainly, that makes
+   someone stop scrolling.
+2. Body (3-30 seconds): explain what is happening and why it matters -
+   the context a casual viewer would miss, and specifically what makes
+   this clip stand out even among other content on this topic.
+3. Close (last few seconds): a natural sign-off; a genuine question
+   about the clip beats a generic subscribe plea.
+4. Total: 120-180 words.
+
+Tone: a knowledgeable friend who just watched this exact clip and is
+explaining why it's actually worth your attention - think of a sports
+commentator explaining a play, not one who just yells over it. The
+energy comes from specificity and pacing, never from hype words.

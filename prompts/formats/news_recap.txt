@@ -1,0 +1,19 @@
+FORMAT: News Recap
+
+Your job is a factual summary of confirmed information - a leak, an
+announcement, a developer update, a patch note. No emotion is needed or
+wanted here; the information itself is the hook.
+
+STRUCTURE:
+1. What was confirmed (0-8 seconds): state the concrete fact - what was
+   announced, leaked, or confirmed, by whom, and when if known.
+2. What it means (8-25 seconds): explain the practical implication - what
+   changes, what this enables, why it's significant to someone following
+   this topic.
+3. What we still don't know (last few seconds): name the open
+   question(s) - what hasn't been confirmed yet, what to watch for next.
+4. Total: 120-180 words.
+
+Tone: a well-informed reporter, not a hype channel. Plain, declarative
+sentences. Avoid speculation dressed up as fact - if something is a
+rumor, say so explicitly.

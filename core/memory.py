@@ -453,6 +453,16 @@ class ChannelMemory:
                 )
             ''')
 
+            # CREATE TABLE IF NOT EXISTS is a no-op on tables that already
+            # exist, so format_used needs an explicit migration for any
+            # pre-existing database created before the multi-format script
+            # system - same pattern as HookLibrary's batch_id/viral_score
+            # migration above.
+            try:
+                cursor.execute('ALTER TABLE channel_shorts ADD COLUMN format_used TEXT')
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
             conn.commit()
             conn.close()
             logger.info("✓ Channel memory database schema initialized")
@@ -461,7 +471,8 @@ class ChannelMemory:
             raise
 
     def add_short(self, title: str, topic: str, source_video: str, script_summary: str,
-                  hook_text: str, thumbnail_style: str, caption_style: str) -> bool:
+                  hook_text: str, thumbnail_style: str, caption_style: str,
+                  format_used: str = None) -> bool:
         """Add newly published short to channel memory"""
         try:
             conn = sqlite3.connect(str(self.db_path))
@@ -469,15 +480,15 @@ class ChannelMemory:
 
             cursor.execute('''
                 INSERT INTO channel_shorts
-                (title, topic, source_video, script_summary, hook_text, thumbnail_style, caption_style, publish_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (title, topic, source_video, script_summary, hook_text, thumbnail_style, caption_style, datetime.now().date()))
+                (title, topic, source_video, script_summary, hook_text, thumbnail_style, caption_style, publish_date, format_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (title, topic, source_video, script_summary, hook_text, thumbnail_style, caption_style, datetime.now().date(), format_used))
 
             conn.commit()
             short_id = cursor.lastrowid
             conn.close()
 
-            logger.info(f"✓ Short added to memory [ID:{short_id}] Topic:{topic}")
+            logger.info(f"✓ Short added to memory [ID:{short_id}] Topic:{topic} Format:{format_used}")
             return True
         except Exception as e:
             logger.error(f"❌ Failed to add short: {e}")
@@ -735,6 +746,57 @@ class ChannelMemory:
         except Exception as e:
             logger.error(f"❌ Failed to generate gap report: {e}")
             return {}
+
+    def get_format_performance(self, min_samples: int = 1) -> Dict:
+        """
+        Aggregate performance (avg CTR/retention/viral_score) per script
+        format, for the multi-format pivot's "track and report, don't
+        auto-adjust" requirement - this is purely a reporting surface, no
+        code currently reads this to change format-selection behavior.
+        Shorts with no format_used recorded (pre-migration rows, or any
+        row logged before the format pivot) are grouped under 'unknown'
+        rather than silently excluded, so the report accounts for 100% of
+        published shorts.
+
+        Returns: {'by_format': {format: {count, avg_ctr, avg_retention,
+        avg_viral_score}}, 'total_shorts': int}
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                SELECT COALESCE(format_used, 'unknown') as fmt,
+                       COUNT(*), AVG(ctr), AVG(retention_30s), AVG(viral_score)
+                FROM channel_shorts
+                GROUP BY fmt
+                ORDER BY AVG(ctr) DESC
+            ''')
+
+            rows = cursor.fetchall()
+            conn.close()
+
+            by_format = {}
+            total = 0
+            for fmt, count, avg_ctr, avg_retention, avg_viral in rows:
+                total += count
+                if count < min_samples:
+                    continue
+                by_format[fmt] = {
+                    'count': count,
+                    'avg_ctr': round(avg_ctr or 0, 4),
+                    'avg_retention': round(avg_retention or 0, 4),
+                    'avg_viral_score': round(avg_viral or 0, 2)
+                }
+
+            logger.info(f"✓ Format performance report generated ({total} shorts, {len(by_format)} format(s) with data)")
+            for fmt, stats in by_format.items():
+                logger.info(f"  - {fmt}: {stats['count']} shorts, CTR {stats['avg_ctr']:.1%}, retention {stats['avg_retention']:.1%}")
+
+            return {'by_format': by_format, 'total_shorts': total}
+        except Exception as e:
+            logger.error(f"❌ Failed to generate format performance report: {e}")
+            return {'by_format': {}, 'total_shorts': 0}
 
 
 def initialize_memory_system() -> Tuple[HookLibrary, ChannelMemory]:

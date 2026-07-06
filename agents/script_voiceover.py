@@ -31,6 +31,121 @@ except ImportError:
 
 SCRIPT_PROMPT_PATH = Path('./prompts/script_generation.txt')
 
+# Multi-format script system: each format gets its own editable prompt file
+# under prompts/formats/, composed with a shared tone/hard-rules preamble
+# (prompts/formats/_shared_rules.txt) rather than duplicating those rules
+# five times - same "editable without touching code, safe fallback if
+# missing/empty" pattern as SCRIPT_PROMPT_PATH above.
+FORMAT_PROMPT_DIR = Path('./prompts/formats')
+SHARED_RULES_PATH = FORMAT_PROMPT_DIR / '_shared_rules.txt'
+VALID_FORMATS = ('hidden_details', 'news_recap', 'ranking', 'comparison', 'reaction')
+
+DEFAULT_SHARED_RULES = """Voice: specific and informed, never generic. You are writing for viewers who
+already care about this topic - deliver value through information and
+specificity, not manufactured excitement.
+
+GTA 6 is the channel's current primary focus. When the clip is GTA 6
+content, name the character, location, mission, or mechanic the clip
+actually shows, and write for someone who follows the game closely. For
+non-GTA6 content (sports, golf, viral moments, any other topic), apply the
+same standard: be specific to what is actually happening on screen, never
+generic.
+
+HARD RULES - never break these:
+1. The hook must reference something that literally happens in THIS
+   specific clip: a character, a location, a mechanic, a detail, a
+   confirmed fact. Never a generic opener that could introduce any video.
+2. Never write a word in all capital letters. The text-to-speech engine
+   reads all-caps words letter by letter and ruins the audio. Normal
+   acronyms like GTA are fine.
+3. Banned words and phrases - never use any of them: "crazy", "insane",
+   "unhinged", "mind blowing", "mind-blowing", "you won't believe". If
+   you are tempted to reach for one, write the specific detail that made
+   you reach for it instead.
+4. Short, punchy sentences - but every sentence carries real information.
+   Cut any sentence that only adds energy without adding a fact.
+5. Any reaction or excitement in the script must be earned by the content
+   actually shown. Do not manufacture excitement the clip does not
+   support.
+
+If a clip content description is provided below, treat it as the ground
+truth of what is on screen - build the entire script from those
+specifics. If no description is available, build from the clip's timing
+and audio data and stay concrete; never invent specific events you cannot
+know happened."""
+
+# In-code fallback for each format's STRUCTURE section, used only if the
+# corresponding prompts/formats/{format}.txt is missing or empty - mirrors
+# DEFAULT_SCRIPT_INSTRUCTIONS' role for the legacy single-file prompt.
+DEFAULT_FORMAT_INSTRUCTIONS = {
+    'hidden_details': """FORMAT: Hidden Details
+
+Your job is to point out something specific happening in this clip that
+most viewers would miss on a casual watch - a detail, a design choice, a
+change, an easter egg, a technical decision - and explain why it actually
+matters.
+
+STRUCTURE:
+1. Identify the detail (0-5 seconds): state the specific thing you
+   noticed, plainly.
+2. Explain why it matters (5-25 seconds): the context that makes this
+   detail significant.
+3. Connect it to what the audience cares about (last few seconds).
+4. Total: 120-180 words.
+
+Tone: an expert pointing something out to a friend, not narrating a
+highlight reel.""",
+    'news_recap': """FORMAT: News Recap
+
+Your job is a factual summary of confirmed information. No emotion is
+needed or wanted here; the information itself is the hook.
+
+STRUCTURE:
+1. What was confirmed (0-8 seconds).
+2. What it means (8-25 seconds).
+3. What we still don't know (last few seconds).
+4. Total: 120-180 words.
+
+Tone: a well-informed reporter, not a hype channel.""",
+    'ranking': """FORMAT: Ranking / Countdown
+
+Your job is to place this specific clip within a ranked list of moments
+from this batch, and describe why it earned its position.
+
+STRUCTURE:
+1. State the rank and the moment (0-5 seconds).
+2. Describe why it made the list (5-25 seconds).
+3. Optional bridge to the rest of the list (last few seconds).
+4. Total: 120-180 words.
+
+Tone: a countdown host with specific opinions, not generic hype.""",
+    'comparison': """FORMAT: Comparison
+
+Your job is a factual, side-by-side comparison anchored in this specific
+clip. The comparison itself is the hook.
+
+STRUCTURE:
+1. State the comparison (0-8 seconds).
+2. Lay out the concrete differences (8-25 seconds).
+3. Close with the takeaway (last few seconds).
+4. Total: 120-180 words.
+
+Tone: even-handed and factual.""",
+    'reaction': """FORMAT: Reaction & Commentary
+
+This format is reserved for clips that are genuinely remarkable. Your job
+is still to explain WHY using specifics, not to manufacture excitement.
+
+STRUCTURE:
+1. Hook (0-3 seconds).
+2. Body (3-30 seconds): what is happening and why it matters.
+3. Close (last few seconds): natural sign-off or genuine question.
+4. Total: 120-180 words.
+
+Tone: a knowledgeable friend explaining why this is worth your
+attention, never a hype bot.""",
+}
+
 DEFAULT_SCRIPT_INSTRUCTIONS = """You are writing a voiceover script for one specific clip from a longer
 video. Your job is to react to what is actually in this clip - not to
 generate generic excitement that could sit on top of any video.
@@ -256,6 +371,50 @@ def _load_script_instructions() -> str:
     return DEFAULT_SCRIPT_INSTRUCTIONS
 
 
+def _load_shared_rules() -> str:
+    """Same load-with-fallback pattern as _load_script_instructions(), for the
+    tone/hard-rules preamble shared by every format (prompts/formats/_shared_rules.txt)."""
+    try:
+        if SHARED_RULES_PATH.exists():
+            content = SHARED_RULES_PATH.read_text().strip()
+            if content:
+                return content
+    except Exception as e:
+        logger.warning(f"⚠ Could not read shared format rules: {e}")
+    return DEFAULT_SHARED_RULES
+
+
+def _load_format_instructions(format_type: str) -> str:
+    """
+    Composes the shared tone/hard-rules preamble with one format's own
+    STRUCTURE section (prompts/formats/{format_type}.txt), each independently
+    editable without touching code and each falling back to an in-code
+    default if its file is missing/empty - same safety pattern as
+    _load_script_instructions(). An unrecognized format_type falls back to
+    the legacy single-file prompt entirely rather than guessing, so a typo'd
+    or stale format string can never silently generate a blank/wrong prompt.
+    """
+    if format_type not in VALID_FORMATS:
+        logger.warning(f"⚠ Unknown format_type '{format_type}' - falling back to legacy script_generation.txt prompt")
+        return _load_script_instructions()
+
+    shared = _load_shared_rules()
+
+    format_path = FORMAT_PROMPT_DIR / f'{format_type}.txt'
+    format_specific = None
+    try:
+        if format_path.exists():
+            content = format_path.read_text().strip()
+            if content:
+                format_specific = content
+    except Exception as e:
+        logger.warning(f"⚠ Could not read format prompt template for '{format_type}': {e}")
+    if format_specific is None:
+        format_specific = DEFAULT_FORMAT_INSTRUCTIONS[format_type]
+
+    return f"{shared}\n\n{format_specific}"
+
+
 class ScriptGenerator:
     """Generates YouTube Shorts scripts using Claude API"""
 
@@ -359,7 +518,8 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
             raise
 
     def generate_script_for_clip(self, clip_data, clip_index, trending_topics=None,
-                                 channel_history=None, clip_description=None):
+                                 channel_history=None, clip_description=None,
+                                 format_type=None, other_clips_context=None):
         """
         Generate a voiceover script scoped to ONE specific clip, not the
         whole source video - each of the 7 shorts gets its own hook/script
@@ -377,11 +537,20 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
                 vision pass) - the ground truth the script reacts to. When
                 None, the prompt says so explicitly so the model stays
                 concrete without inventing events it cannot know.
+            format_type: One of VALID_FORMATS ('hidden_details', 'news_recap',
+                'ranking', 'comparison', 'reaction'), chosen upstream by
+                agents/format_selector.py. None falls back to the legacy
+                single-file prompt (prompts/script_generation.txt) - this
+                param is optional so existing callers keep working unchanged.
+            other_clips_context: Lightweight (non-vision) summaries of the
+                OTHER clips selected in this same batch - only meaningful for
+                'ranking'/'comparison', which describe multiple clips in one
+                script. None/empty for other formats.
 
         Returns:
             dict: Generated script with metadata
         """
-        logger.info(f"📝 Generating script for clip {clip_index + 1}...")
+        logger.info(f"📝 Generating script for clip {clip_index + 1}" + (f" (format: {format_type})" if format_type else "") + "...")
 
         if clip_description:
             content_section = f"""What is actually happening in this clip (ground truth from frame analysis):
@@ -393,7 +562,15 @@ Generate a JSON object with: hook, main_content, cta, full_script, reading_time_
                 "not invent specific events you cannot know happened."
             )
 
-        instructions = _load_script_instructions()
+        if other_clips_context:
+            content_section += f"""
+
+Other clips in this same batch (for Ranking/Comparison context only - use
+these ONLY to place THIS clip in relative context, never invent details
+about a clip beyond what's given here):
+{json.dumps(other_clips_context, indent=2)}"""
+
+        instructions = _load_format_instructions(format_type) if format_type else _load_script_instructions()
         prompt = f"""{instructions}
 
 {content_section}
@@ -408,15 +585,25 @@ Clip data:
 Trending topics: {json.dumps(trending_topics or [], indent=2)}
 Channel history: {json.dumps(channel_history or [], indent=2)}
 
-Generate a JSON object with: hook, main_content, cta, full_script, reading_time_seconds"""
+Generate a JSON object with: hook, main_content, cta, full_script, reading_time_seconds, format_used
+(format_used: echo back which format you actually wrote this script in - one of
+hidden_details, news_recap, ranking, comparison, reaction)"""
 
         try:
             script_data = self._call_and_parse(prompt)
+            actual_format = script_data.get('format_used')
+            if format_type and actual_format and actual_format != format_type:
+                logger.warning(
+                    f"⚠ Clip {clip_index + 1}: requested format '{format_type}' but model's "
+                    f"format_used echoed back '{actual_format}' - the format prompt may not be "
+                    f"landing correctly"
+                )
             logger.info(f"✓ Script generated for clip {clip_index + 1} ({script_data.get('reading_time_seconds', 0)}s)")
             return {
                 'status': 'success',
                 'clip_index': clip_index,
                 'script': script_data,
+                'format_type': format_type,
                 'model': 'claude-haiku-4-5-20251001'
             }
 
@@ -764,8 +951,37 @@ def generate_voiceover(clip_data, trending_topics=None, channel_history=None):
     }
 
 
+def get_clip_description(clip_data, clip_index, source_video_path):
+    """
+    Runs ClipContentAnalyzer's keyframe vision pass for one clip, or
+    returns None (metadata-only degraded mode) if source_video_path is
+    unset, the clip's timing is invalid, or analysis fails. Factored out
+    of generate_voiceover_for_clip() so callers that need the description
+    BEFORE script generation (e.g. core/pipeline.py's format selector,
+    which must know the clip's content to choose a format prior to writing
+    the script) can get it once and pass it through, instead of the vision
+    API being called twice for the same clip.
+    """
+    if not source_video_path:
+        return None
+
+    start_time = clip_data.get('start_time', 0)
+    end_time = clip_data.get('end_time', clip_data.get('duration', 0))
+    if end_time <= start_time:
+        logger.warning(f"⚠ Clip {clip_index + 1} has invalid timing ({start_time} -> {end_time}), skipping content analysis")
+        return None
+
+    analyzer = ClipContentAnalyzer()
+    description = analyzer.describe_clip(source_video_path, start_time, end_time)
+    if description is None:
+        logger.info(f"ℹ Clip {clip_index + 1}: no content description available, generating script from metadata only")
+    return description
+
+
 def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None,
-                                channel_history=None, source_video_path=None):
+                                channel_history=None, source_video_path=None,
+                                format_type=None, other_clips_context=None,
+                                clip_description=None):
     """
     Generate a script + voiceover scoped to ONE specific clip. Each of the
     7 shorts calls this independently, producing its own hook/script and
@@ -784,30 +1000,37 @@ def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None,
             screen instead of generating blind from engagement scores.
             When None (or analysis fails), script generation proceeds
             from metadata only - degraded, not broken.
+        format_type: One of script_voiceover.VALID_FORMATS, chosen upstream
+            by agents/format_selector.py. None uses the legacy single-file
+            prompt (backward compatible with callers that don't pass this).
+        other_clips_context: Lightweight summaries of the other clips in
+            this batch, for 'ranking'/'comparison' formats only.
+        clip_description: Pre-computed description from get_clip_description(),
+            if the caller already needed it before calling this (e.g. to
+            feed the format selector). None re-runs the vision analysis
+            internally, same as before this param existed.
 
     Returns:
         dict: Script + voiceover results for this one clip, including the
-        clip_description used (or None) so downstream consumers and
-        debugging can see exactly what the script was reacting to.
+        clip_description used (or None) and the format_type/format_used
+        actually applied, so downstream consumers (channel memory logging,
+        debugging) can see exactly what the script was reacting to and
+        which format it was written in.
     """
     logger.info(f"🎬 Starting script + voiceover generation for clip {clip_index + 1}...")
 
-    clip_description = None
-    if source_video_path:
-        start_time = clip_data.get('start_time', 0)
-        end_time = clip_data.get('end_time', clip_data.get('duration', 0))
-        if end_time > start_time:
-            analyzer = ClipContentAnalyzer()
-            clip_description = analyzer.describe_clip(source_video_path, start_time, end_time)
-        else:
-            logger.warning(f"⚠ Clip {clip_index + 1} has invalid timing ({start_time} -> {end_time}), skipping content analysis")
     if clip_description is None:
-        logger.info(f"ℹ Clip {clip_index + 1}: no content description available, generating script from metadata only")
+        # Callers that already ran get_clip_description() themselves (e.g.
+        # core/pipeline.py, which needs the description BEFORE this call to
+        # feed the format selector) pass it in directly so this doesn't
+        # spend a second vision API call describing the same clip twice.
+        clip_description = get_clip_description(clip_data, clip_index, source_video_path)
 
     generator = ScriptGenerator()
     script_result = generator.generate_script_for_clip(
         clip_data, clip_index, trending_topics, channel_history,
-        clip_description=clip_description
+        clip_description=clip_description, format_type=format_type,
+        other_clips_context=other_clips_context
     )
 
     if script_result['status'] != 'success':
@@ -823,6 +1046,8 @@ def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None,
         'clip_index': clip_index,
         'script': script,
         'clip_description': clip_description,
+        'format_type': format_type,
+        'format_used': script.get('format_used'),
         'voiceover': voiceover_result,
         'timestamp': datetime.now().isoformat()
     }

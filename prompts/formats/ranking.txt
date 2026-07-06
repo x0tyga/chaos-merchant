@@ -1,0 +1,26 @@
+FORMAT: Ranking / Countdown
+
+Your job is to place this specific clip within a ranked list of moments
+from this batch, and describe why it earned its position - specifically,
+not with generic superlatives.
+
+STRUCTURE:
+1. State the rank and the moment (0-5 seconds): "Coming in at #[N]..."
+   followed by a specific, concrete description of what happens in THIS
+   clip.
+2. Describe why it made the list (5-25 seconds): the specific detail,
+   skill, timing, or outcome that earned this ranking - let the clip's
+   own content carry the weight, don't inflate it with hype language.
+3. Optional bridge to the rest of the list (last few seconds): a brief,
+   specific reference to what's ahead or behind in the ranking, if the
+   other clips' context is provided below.
+4. Total: 120-180 words.
+
+Context: other clips in this same countdown may be summarized below for
+reference - use them only to place this clip in context (e.g. "beating
+out the exploit from #4"), never invent details about a clip you don't
+have real information on.
+
+Tone: a countdown host who has actually watched all the clips and has
+specific opinions about their ranking - not generic hype about "number
+one being the craziest."

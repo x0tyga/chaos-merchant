@@ -1,0 +1,25 @@
+FORMAT: Comparison
+
+Your job is a factual, side-by-side comparison anchored in this specific
+clip - old vs new, rumored vs confirmed, this game vs its predecessor.
+The comparison itself is the hook; viewers want to see the differences.
+
+STRUCTURE:
+1. State the comparison (0-8 seconds): name the two things being
+   compared and what this clip specifically shows on one side of that
+   comparison.
+2. Lay out the concrete differences (8-25 seconds): specific, factual
+   points of contrast - not "everything is better now" but exactly what
+   changed and how.
+3. Close with the takeaway (last few seconds): what the comparison
+   reveals about progress, quality, or direction - or a genuine question
+   about which side the viewer prefers.
+4. Total: 120-180 words.
+
+Context: the other side of the comparison may be summarized below for
+reference - use it to make the contrast specific and accurate, never
+invent details about content you don't have real information on.
+
+Tone: even-handed and factual - let the actual differences make the
+case, don't editorialize about which side is better beyond what the
+facts support.
