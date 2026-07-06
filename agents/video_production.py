@@ -17,7 +17,7 @@ try:
     # is imported directly from the top-level moviepy package now.
     from moviepy import (
         VideoFileClip, AudioFileClip, CompositeVideoClip, CompositeAudioClip,
-        ImageClip, TextClip, concatenate_videoclips, vfx
+        ImageClip, TextClip, concatenate_videoclips, concatenate_audioclips, vfx
     )
 except ImportError:
     raise ImportError("moviepy required: pip install moviepy")
@@ -215,8 +215,64 @@ class CaptionSynchronizer:
         return video_clip
 
 
+class BackgroundMusicLibrary:
+    """
+    Loads background music tracks from a user-managed directory
+    (BACKGROUND_MUSIC_DIR, default ./assets/music - drop royalty-free
+    tracks there). This is the REAL background music bed for shorts; the
+    source video's own audio is never used as music (it's stripped
+    entirely at clip extraction - see produce_single_short).
+
+    Track selection rotates deterministically by short number so a batch
+    gets variety but the same batch re-run picks the same tracks. Tracks
+    shorter than the clip are looped; longer ones are trimmed. If no
+    music directory/files exist, returns (None, None) and shorts ship
+    with voiceover-only audio - degraded, never a crash.
+    """
+
+    SUPPORTED_FORMATS = ('.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac')
+
+    @classmethod
+    def load_for_short(cls, short_number: int, duration: float) -> Tuple[object, str]:
+        """Returns (AudioClip trimmed/looped to `duration`, track filename) or (None, None)."""
+        music_dir = Path(os.getenv('BACKGROUND_MUSIC_DIR', './assets/music'))
+        try:
+            if not music_dir.exists():
+                logger.info(
+                    f"ℹ No background music directory at {music_dir} - shorts will have "
+                    f"voiceover-only audio. Drop royalty-free tracks there to add a music bed."
+                )
+                return None, None
+
+            tracks = sorted(
+                f for f in music_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in cls.SUPPORTED_FORMATS
+            )
+            if not tracks:
+                logger.info(
+                    f"ℹ Background music directory {music_dir} has no audio files "
+                    f"({'/'.join(cls.SUPPORTED_FORMATS)}) - shorts will have voiceover-only audio."
+                )
+                return None, None
+
+            track_path = tracks[short_number % len(tracks)]
+            music = AudioFileClip(str(track_path))
+
+            if music.duration < duration:
+                loops_needed = int(duration // music.duration) + 1
+                music = concatenate_audioclips([music] * loops_needed)
+                logger.info(f"✓ Background music '{track_path.name}' looped {loops_needed}x to cover {duration:.1f}s")
+            music = music.subclipped(0, duration)
+
+            logger.info(f"✓ Background music loaded: '{track_path.name}' ({duration:.1f}s)")
+            return music, track_path.name
+        except Exception:
+            logger.exception(f"⚠ Background music loading failed - continuing with voiceover-only audio")
+            return None, None
+
+
 class AudioProcessor:
-    """Processes audio: voiceover, music ducking, normalization"""
+    """Processes audio: voiceover mixed over a ducked background music bed"""
 
     def __init__(self, voiceover_path: str):
         self.voiceover_path = Path(voiceover_path)
@@ -273,13 +329,22 @@ class AudioProcessor:
             return background_audio, False
 
     def prepare_audio(self, video_clip: VideoFileClip, voiceover_audio: AudioFileClip,
-                     start_offset: float = 0.5) -> Tuple[AudioFileClip, bool]:
+                     background_music=None, start_offset: float = 0.5) -> Tuple[AudioFileClip, bool]:
         """
-        Prepare final audio: voiceover mixed over ducked background music.
-        Background music is genuinely retained (ducked, not discarded) when present.
+        Prepare final audio: voiceover mixed over a ducked background music
+        bed (from BackgroundMusicLibrary), or voiceover alone if no music
+        is configured.
 
-        Returns: (audio_clip, ducking_applied) - ducking_applied is False if
-        there was no background audio to duck, or ducking itself failed.
+        The SOURCE VIDEO'S AUDIO IS NEVER PART OF THE MIX. This method
+        deliberately does not read video_clip.audio at all (video_clip is
+        only used for its duration) - the previous implementation used the
+        source clip's own audio as the "background music", which is
+        exactly the source-audio bleed-through reported from real testing.
+        The final track is built exclusively from the voiceover file and
+        the explicit background_music clip passed in.
+
+        Returns: (audio_clip, ducking_applied) - ducking_applied is False
+        if there was no background music to duck, or ducking itself failed.
         """
         try:
             vo_duration = voiceover_audio.duration
@@ -291,17 +356,17 @@ class AudioProcessor:
                 voiceover_audio = voiceover_audio.subclipped(0, trimmed_duration)
                 logger.warning(f"⚠ Voiceover trimmed to fit clip ({vo_duration:.1f}s -> {trimmed_duration:.1f}s)")
             elif vo_duration < clip_duration - start_offset:
-                logger.info(f"ℹ Voiceover ({vo_duration:.1f}s) shorter than remaining clip time; background audio continues after voiceover ends")
+                logger.info(f"ℹ Voiceover ({vo_duration:.1f}s) shorter than remaining clip time; background music continues after voiceover ends")
 
             voiceover_audio = voiceover_audio.with_start(start_offset)
             vo_end = start_offset + voiceover_audio.duration
 
-            if video_clip.audio is not None:
-                logger.info("✓ Compositing voiceover with ducked background audio")
-                ducked_bg, ducking_applied = self.apply_music_ducking(video_clip.audio, start_offset, vo_end)
+            if background_music is not None:
+                logger.info("✓ Compositing voiceover over ducked background music (source audio excluded)")
+                ducked_bg, ducking_applied = self.apply_music_ducking(background_music, start_offset, vo_end)
                 final_audio = CompositeAudioClip([ducked_bg, voiceover_audio]).with_duration(clip_duration)
             else:
-                logger.info("✓ Using voiceover as sole audio track (no background audio in source clip)")
+                logger.info("✓ Using voiceover as sole audio track (no background music configured, source audio excluded)")
                 final_audio = CompositeAudioClip([voiceover_audio]).with_duration(clip_duration)
                 ducking_applied = False
 
@@ -735,6 +800,16 @@ class VideoProducer:
             extractor = ClipExtractor(str(self.source_video_path))
             extracted_clip = extractor.extract_clip(clip_start, clip_end)
 
+            # Strip the source video's audio COMPLETELY, immediately at
+            # extraction - before any reframe/composite step can carry it
+            # forward. The final audio track is built exclusively from
+            # voiceover + background music in prepare_audio(); doing the
+            # strip here as well makes source-audio bleed-through
+            # structurally impossible no matter what any downstream
+            # composite does with component audio.
+            extracted_clip = extracted_clip.without_audio()
+            logger.info("✓ Source audio stripped (final mix = voiceover + background music only)")
+
             logger.info(f"Step 2: Reframing to 9:16 vertical...")
             aspect = VerticalReframer.detect_aspect_ratio(extracted_clip)
             method = 'crop' if aspect == '16:9' else 'letterbox'
@@ -751,10 +826,15 @@ class VideoProducer:
                 )
             clip_script = clip_voiceover.get('script', {}).get('full_script', '')
 
-            logger.info(f"Step 3: Preparing audio (voiceover + music ducking)...")
+            logger.info(f"Step 3: Preparing audio (voiceover + background music, source audio excluded)...")
             audio_processor = AudioProcessor(clip_voiceover['voiceover']['audio_path'])
             voiceover_audio = audio_processor.load_voiceover()
-            final_audio, ducking_applied = audio_processor.prepare_audio(reframed_clip, voiceover_audio)
+            background_music, music_track = BackgroundMusicLibrary.load_for_short(
+                short_number, reframed_clip.duration
+            )
+            final_audio, ducking_applied = audio_processor.prepare_audio(
+                reframed_clip, voiceover_audio, background_music=background_music
+            )
             reframed_clip = reframed_clip.with_audio(final_audio)
 
             logger.info(f"Step 4: Adding burned-in captions...")
@@ -791,6 +871,8 @@ class VideoProducer:
                 extractor.close()
                 reframed_clip.close()
                 voiceover_audio.close()
+                if background_music is not None:
+                    background_music.close()
                 captioned_clip.close() if captioned_clip != reframed_clip else None
                 graded_clip.close() if graded_clip != captioned_clip else None
                 branded_clip.close() if branded_clip != graded_clip else None
