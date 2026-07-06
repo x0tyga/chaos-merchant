@@ -167,7 +167,11 @@ def main():
     # catch same-day virality). Doesn't touch the YouTube Data API quota
     # at all (yt-dlp scraping + PRAW, not the tracked API), so priority
     # here only matters for jobs.mark_running()'s double-fire prevention,
-    # not quota gating.
+    # not quota gating. Actual daily volume is a soft target set in
+    # config/content_calendar.json (target_batches_per_day) - see
+    # agents/clip_sourcing.py's ClipSourcingAgent.SCHEDULED_RUNS_PER_DAY,
+    # which assumes exactly these two runs/day; update both together if
+    # this schedule ever changes.
     scheduler.schedule_job(
         'clip_sourcing_morning',
         lambda: run_clip_sourcing(),

@@ -374,9 +374,14 @@ class Pipeline:
 
             from agents.script_voiceover import generate_voiceover_for_clip, get_clip_description
             from agents.format_selector import select_format_for_clip
+            from core.content_calendar import load_content_calendar
 
             trending_topics = self._load_trending_topics()
             channel_history = self._load_channel_history()
+            # Soft format-mix guidance for this batch - see
+            # core/content_calendar.py: never overrides the Reaction gate
+            # or forces a format that doesn't fit a clip's actual content.
+            format_mix = load_content_calendar().get('format_mix')
 
             top_clip_indices = clip_manifest.get('top_clip_indices', [])
             clips = clip_manifest.get('clips', [])
@@ -408,7 +413,8 @@ class Pipeline:
                     clip_description = get_clip_description(clip_data, i, str(self.video_path))
 
                     format_type, format_rationale = select_format_for_clip(
-                        clip_data, clip_description=clip_description, trending_topics=trending_topics
+                        clip_data, clip_description=clip_description, trending_topics=trending_topics,
+                        format_mix=format_mix
                     )
                     logger.info(f"✓ Clip {i + 1}/{len(top_clip_indices)}: format '{format_type}' ({format_rationale})")
 

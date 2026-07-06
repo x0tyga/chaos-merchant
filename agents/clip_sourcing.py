@@ -417,14 +417,46 @@ class SourcingRateLimiter:
 class ClipSourcingAgent:
     """Main orchestrator: discover candidates -> dedup -> gate -> download into INPUT_DIR."""
 
+    # main.py registers exactly two scheduled clip_sourcing runs per day
+    # (07:30, 18:00) - used only to translate content_calendar.json's daily
+    # volume target into a soft per-run guidance number below. If main.py's
+    # schedule ever changes, update this to match.
+    SCHEDULED_RUNS_PER_DAY = 2
+
     def __init__(self, input_dir: str = None):
         self.input_dir = Path(input_dir or os.getenv('INPUT_DIR', './input'))
         self.input_dir.mkdir(parents=True, exist_ok=True)
         self.registry = SourceRegistry()
         self.gate = CopyrightRiskGate()
         self.limiter = SourcingRateLimiter()
+        self._apply_calendar_guidance()
         self.reddit_fetcher = RedditClipFetcher()
         self.youtube_fetcher = YouTubeClipFetcher()
+
+    def _apply_calendar_guidance(self):
+        """
+        content_calendar.json's target_batches_per_day is soft volume
+        guidance, layered ON TOP of (never instead of)
+        SOURCING_MAX_DOWNLOADS_PER_RUN's hard rate-limiting ceiling from
+        Component 2 - whichever cap is LOWER wins, so an aggressive
+        calendar target can never bypass the rate limiter, but a
+        conservative calendar target can still pull the effective cap
+        down below the rate limiter's default.
+        """
+        try:
+            from core.content_calendar import load_content_calendar
+            target_per_day = load_content_calendar().get('target_batches_per_day', 1)
+            calendar_derived_cap = max(1, -(-int(target_per_day) // self.SCHEDULED_RUNS_PER_DAY))  # ceil division
+            if calendar_derived_cap < self.limiter.max_downloads:
+                logger.info(
+                    f"ℹ Content calendar target ({target_per_day} batches/day over "
+                    f"{self.SCHEDULED_RUNS_PER_DAY} scheduled runs) caps this run's "
+                    f"downloads at {calendar_derived_cap} (below the "
+                    f"SOURCING_MAX_DOWNLOADS_PER_RUN ceiling of {self.limiter.max_downloads})"
+                )
+                self.limiter.max_downloads = calendar_derived_cap
+        except Exception as e:
+            logger.warning(f"⚠ Could not apply content calendar volume guidance, using rate-limiter default: {e}")
 
     def run(self, dry_run: bool = False, youtube_search_queries: List[str] = None) -> Dict:
         logger.info("=" * 70)
