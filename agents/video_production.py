@@ -53,10 +53,82 @@ class ClipExtractor:
                 f"✓ Extracted clip: {start_time:.1f}s - {end_time:.1f}s "
                 f"({clip.duration:.1f}s, ~{expected_frames} frames @ {self.fps}fps)"
             )
+
+            real_duration = self._detect_playable_duration(clip)
+            if real_duration < clip.duration - 0.5:
+                logger.error(
+                    f"❌ Truncating clip from {clip.duration:.1f}s (claimed by source file "
+                    f"metadata) to {real_duration:.1f}s (last point real picture content was "
+                    f"detected) - exporting the full claimed duration would have produced a "
+                    f"black/silent tail in the finished Short"
+                )
+                clip = clip.subclipped(0, real_duration)
+
             return clip
         except Exception:
             logger.exception("❌ Clip extraction failed")
             raise
+
+    @staticmethod
+    def _detect_playable_duration(clip: VideoFileClip, black_threshold: float = 8.0) -> float:
+        """
+        A source video's duration metadata (what ffprobe/moviepy report) can
+        overstate how much of the file is actually decodable - a known gotcha
+        with some camera/screen-recording muxing where the container header
+        claims more frames than the stream really contains. Reading past the
+        real content doesn't raise an exception; it silently returns black
+        frames, which matches exactly the "real content for ~30s then black
+        and silent for the rest of the claimed duration" symptom from the
+        first real-hardware run.
+
+        Samples frames spread across the clip's claimed duration and looks
+        for a trailing run of near-black frames preceded by real (non-black)
+        content. Deliberately requires the LAST THREE sampled points to all
+        be black before concluding there's an undecodable tail - a single
+        dark sample near the end (a legitimately dark scene, e.g. gaming
+        footage at night) must not be mistaken for this.
+
+        Returns the clip's original duration unchanged if no such trailing
+        gap is found (the overwhelmingly common case) or if sampling itself
+        fails for any reason - this is a safety net, not a requirement for
+        extraction to succeed.
+        """
+        duration = clip.duration
+        if not duration or duration <= 2.0:
+            return duration
+
+        try:
+            fractions = (0.10, 0.25, 0.40, 0.55, 0.70, 0.82, 0.91, 0.97)
+            samples = []
+            for frac in fractions:
+                t = min(duration * frac, max(0.0, duration - 0.05))
+                frame = clip.get_frame(t)
+                samples.append((t, float(np.mean(frame))))
+
+            logger.info(
+                "📊 Playable-duration probe brightness samples: " +
+                ", ".join(f"{t:.1f}s={b:.1f}" for t, b in samples)
+            )
+
+            black_flags = [b <= black_threshold for _, b in samples]
+            if not any(not flag for flag in black_flags):
+                # every sample is black - can't tell where content actually
+                # ends; don't guess and risk truncating a real dark clip.
+                return duration
+            if not (black_flags[-1] and black_flags[-2] and black_flags[-3]):
+                # trailing 3 samples aren't all black - no clear tail gap
+                return duration
+
+            # Walk backwards from the end to the first non-black sample;
+            # that's the last confirmed point of real content.
+            for t, brightness in reversed(samples):
+                if brightness > black_threshold:
+                    return t
+
+            return duration
+        except Exception:
+            logger.exception("⚠ Playable-duration probe failed - using the clip's reported duration as-is")
+            return duration
 
     def close(self):
         """Close video file"""
@@ -1091,14 +1163,36 @@ class VideoProducer:
             clip_script = clip_voiceover.get('script', {}).get('full_script', '')
 
             logger.info(f"Step 3: Preparing audio (voiceover + background music, source audio excluded)...")
+            clip_duration = reframed_clip.duration
             audio_processor = AudioProcessor(clip_voiceover['voiceover']['audio_path'])
             voiceover_audio = audio_processor.load_voiceover()
+            original_vo_duration = voiceover_audio.duration
             background_music, music_track = BackgroundMusicLibrary.load_for_short(
                 short_number, reframed_clip.duration
             )
             final_audio, ducking_applied = audio_processor.prepare_audio(
                 reframed_clip, voiceover_audio, background_music=background_music
             )
+
+            # prepare_audio() reassigns its own local `voiceover_audio` when
+            # trimming, so this outer reference is still the ORIGINAL,
+            # untrimmed voiceover - exactly what's needed to log what the
+            # voiceover actually was before any reconciliation happened.
+            logger.info(
+                f"📊 Duration reconciliation: clip={clip_duration:.2f}s, "
+                f"voiceover(original)={original_vo_duration:.2f}s, "
+                f"final_audio_track={final_audio.duration:.2f}s - the video's own "
+                f"duration is authoritative; voiceover is trimmed to fit it, never "
+                f"the other way around"
+            )
+            if abs(final_audio.duration - clip_duration) > 0.05:
+                logger.error(
+                    f"❌ final_audio duration ({final_audio.duration:.2f}s) does not match "
+                    f"the clip's duration ({clip_duration:.2f}s) - forcing it back so the "
+                    f"video's length can never be shortened by the audio track"
+                )
+                final_audio = final_audio.with_duration(clip_duration)
+
             reframed_clip = reframed_clip.with_audio(final_audio)
 
             logger.info(f"Step 4: Adding burned-in captions...")
@@ -1121,6 +1215,27 @@ class VideoProducer:
             logger.info(f"Step 6: Adding channel branding...")
             branded_clip = BrandingOverlay.apply_branding(graded_clip, self.channel_name)
             branding_applied = branded_clip is not graded_clip
+
+            # Final duration sanity check before export - captions/color
+            # grading/branding each already force their own composite back to
+            # video_clip.duration internally, but this is the one place that
+            # would catch any future regression in that chain before it ships
+            # as a truncated Short: the exported video's length must always
+            # be the clip's own length, never something shorter driven by an
+            # audio track.
+            logger.info(
+                f"📊 Duration check before export - clip: {clip_duration:.2f}s | "
+                f"voiceover (original): {original_vo_duration:.2f}s | "
+                f"final audio track: {final_audio.duration:.2f}s | "
+                f"final video (post captions/grading/branding): {branded_clip.duration:.2f}s"
+            )
+            if abs(branded_clip.duration - clip_duration) > 0.05:
+                logger.error(
+                    f"❌ Final video duration ({branded_clip.duration:.2f}s) does not match "
+                    f"the clip's own duration ({clip_duration:.2f}s) going into export - "
+                    f"forcing it back to the clip's full duration"
+                )
+                branded_clip = branded_clip.with_duration(clip_duration)
 
             output_name = f"video_{self.source_video_path.stem}_{short_number:03d}.mp4"
             output_path = self.output_dir / output_name
