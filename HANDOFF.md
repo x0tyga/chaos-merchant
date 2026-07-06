@@ -1,12 +1,12 @@
 # CHAOS MERCHANT - PROJECT HANDOFF DOCUMENT
 
 **Current Date:** 2026-07-06
-**Branch:** `claude/session-handoff-review-bawvji` (this session's designated branch; the prior session's `claude/github-abundant-aho-c2btu7` branch/main-sync claim could not be verified against `origin/main`, which is still at the repo's initial commit - see note below)
+**Branch:** `claude/session-handoff-review-bawvji` (this session's designated branch, kept 1:1 in sync with `main` via fast-forward push after every bug fix)
 **Current model:** `claude-sonnet-5`
-**Status:** First real-hardware run happened and produced broken output (1 MP4 instead of 7, ~7s unformatted video, no captions/effects/branding). Working through a 5-bug punch list from that run, one at a time, with a debrief + individual push after each fix. **All 5 bugs are now fixed.**
-**Next Action:** the 5-bug punch list is complete. Next real milestone is another clean hardware run to confirm all 5 fixes actually resolve what was seen in production (see "Assets needed" and Bug 4's caveat below). After that, the two queued DIRECTION DECISIONS (format pivot, autonomous sourcing) are next, but only once the user explicitly asks to start scoping them.
+**Status:** First real-hardware run happened and produced broken output (1 MP4 instead of 7, ~7s unformatted video, no captions/effects/branding). A 5-bug punch list was made from that run and fixed one at a time, with a debrief + individual push after each. **All 5 bugs are now fixed and on `main`.**
+**Next Action:** This is a home-machine handoff. Before the next real-hardware test run, work through the "HOME MACHINE TO-DO LIST" section below (pull latest, add music files, set `CAPTION_FONT_PATH`). After a clean test run confirms the fixes hold, the two queued DIRECTION DECISIONS (format pivot, autonomous clip sourcing) are the next body of work, but only once the user explicitly asks to start scoping them - nothing there has been designed or built yet.
 
-**Branch/remote note:** `origin/main` and `claude/session-handoff-review-bawvji` are kept in sync throughout this session (fast-forward pushes after each bug). Bug 5 is committed on this branch and should be pushed to `main` the same way once reviewed.
+**Branch/remote note:** `origin/main` and `claude/session-handoff-review-bawvji` are confirmed in sync as of this update - every bug fix this session was pushed to both via fast-forward.
 
 ---
 
@@ -72,21 +72,37 @@ On the "adjust thresholds vs. fix the underlying issue" question specifically: t
 Verified via a fake-object harness: `VideoProducer._write_short_error_file` produces a correctly-formatted file with short number/clip index/step/reason; `quality_control.py` correctly imports and uses the live `CaptionSynchronizer.CAPTION_TOP_RATIO` constant; `Pipeline._write_qc_failure_files` writes one QC error file per genuinely-failing short (combining video + caption + similarity reasons) and none for a short that passed everything.
 Change spans `agents/video_production.py`, `agents/quality_control.py`, `agents/output_packaging.py`, and `core/pipeline.py`.
 
-### Assets needed before these can be tested for real
-
-**`assets/music/` currently contains only a README - no actual audio files.** Bugs 1 and 2 cannot be meaningfully tested on real hardware until royalty-free music tracks are actually dropped into that folder (supported formats: `.mp3/.wav/.m4a/.aac/.ogg/.flac`). Without any tracks present, `BackgroundMusicLibrary.load_for_short()` degrades to `None` and the pipeline runs voiceover-only - which will falsely look like Bug 1 is "fixed" (no source audio, but also no music) without actually exercising the ducking/base-level logic in Bug 2 at all.
-
 ---
 
 ## BUGS STILL OUTSTANDING
 
-None - all 5 bugs from the original punch list are fixed as of this update. See "Bugs fixed today" above for Bug 5's debrief (the most recently closed). Next step is a clean hardware run to confirm all 5 fixes actually resolve what was seen in production, not just in mocks/fake-object harnesses - see the caveats under Bug 4 and Bug 5 above for what specifically to watch for in that run's logs.
+None - all 5 bugs from the original punch list are fixed as of this update. See "Bugs fixed today" above for each bug's root cause and fix (Bug 5 was the most recently closed). Next step is a clean hardware run to confirm all 5 fixes actually resolve what was seen in production, not just in mocks/fake-object harnesses - see the caveats under Bug 4 and Bug 5 above for what specifically to watch for in that run's logs, and the checklist immediately below for what needs to be set up on the home machine first.
 
 ---
 
-## DIRECTION DECISIONS (made today, not yet implemented in code)
+## HOME MACHINE TO-DO LIST
 
-These are decisions the user has made about where the project is headed next. Neither has any corresponding code in the repository yet - both are documented here as decided-but-not-yet-built direction, to be scoped and implemented in future sessions.
+Do these, in order, before the next real-hardware test run:
+
+1. **Pull latest from `main`.** All 5 bug fixes are pushed and `main` is confirmed in sync as of this handoff - `git pull origin main` (or re-clone) before testing, so the run actually exercises the fixed code and not the version that produced the original 5-bug report.
+
+2. **Add real music files to `assets/music/`.** The folder currently contains only a README, no actual audio - Bugs 1 and 2 (source audio bleed-through, music volume/ducking) cannot be meaningfully verified without real tracks present. `BackgroundMusicLibrary.load_for_short()` silently degrades to voiceover-only audio when the folder is empty, which will falsely *look* like Bug 1 is fixed (no source audio bleeding through - true, but also no music at all) without ever exercising Bug 2's ducking/base-level envelope logic. Drop in royalty-free tracks (supported formats: `.mp3/.wav/.m4a/.aac/.ogg/.flac`) - any number of files, they rotate per short automatically.
+
+3. **Set `CAPTION_FONT_PATH` in `.env`.** Find an installed font path with:
+   ```
+   fc-list | grep -i dejavu
+   ```
+   (or swap `dejavu` for whichever gaming-style font you want to use - Bebas Neue is the one referenced elsewhere in this codebase's comments). Then set in `.env`:
+   ```
+   CAPTION_FONT_PATH=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+   ```
+   (adjust to the actual path `fc-list` prints). This isn't strictly required to get *some* captions - Bug 3's fix added a fallback chain that tries DejaVu/Liberation/macOS system fonts automatically if this is unset - but setting it explicitly is still recommended: it guarantees a specific, known-good font is used instead of depending on whatever happens to be installed, and it's the only way to get a real gaming-style font (Bebas Neue etc.) instead of the generic fallback. `.env.example` has the up-to-date comment on this (the old comment claiming "uses system default font" was wrong under moviepy 2.x and has been corrected in this session's Bug 3 commit).
+
+---
+
+## DIRECTION DECISIONS - what still needs to be built (not yet implemented in code)
+
+These are decisions the user has made about where the project is headed next, queued behind the bug list and the home-machine test run above. Neither has any corresponding code in the repository yet - both are documented here as decided-but-not-yet-built direction, to be scoped and implemented in future sessions. Do not start scoping either until the user explicitly asks for it.
 
 ### Format pivot: away from emotion-based reaction scripts, toward format templates
 
@@ -113,13 +129,14 @@ No design work has been done yet on sourcing criteria (what makes a video worth 
 
 1. Read this HANDOFF.md top to bottom - it reflects the exact current state as of the interrupt that triggered this update.
 2. `git log --oneline -15` and `git status` to confirm exactly which fixes have landed, and on which branch/remote - see the "Branch/remote note" at the top; don't assume `main` is in sync without checking.
-3. All 5 bugs are fixed. Once the user has real music files in `assets/music/`, the next real milestone is another clean hardware run to confirm Bugs 1-5 actually resolved what was seen in production, not just in mocks - pay particular attention to: Bug 4's new duration logging (its fix was a best-effort heuristic that couldn't be validated against the original broken source file - see its caveat above), and Bug 5's per-clip `*_ERROR.txt`/`*_QC_ERROR.txt` files (confirm they actually appear in `output_dir` for any clip that doesn't make it, and that a QC issue on one clip no longer prevents the others from being packaged).
-4. The format-template pivot and autonomous clip-sourcing decisions are queued behind the bug list - don't start scoping either until the user explicitly asks for it.
+3. All 5 bugs are fixed and on `main`. Work through the "HOME MACHINE TO-DO LIST" above (pull latest, add music files, set `CAPTION_FONT_PATH`) before the next real hardware run.
+4. On that run, pay particular attention to: Bug 4's new duration logging (its fix was a best-effort heuristic that couldn't be validated against the original broken source file - see its caveat above), and Bug 5's per-clip `*_ERROR.txt`/`*_QC_ERROR.txt` files (confirm they actually appear in `output_dir` for any clip that doesn't make it, and that a QC issue on one clip no longer prevents the others from being packaged).
+5. The format-template pivot and autonomous clip-sourcing decisions are queued behind that - don't start scoping either until the user explicitly asks for it.
 
 ---
 
 ## DOCUMENT META
 
 **Document created:** 2026-07-02
-**Last updated:** 2026-07-06, bugfix session complete (Bug 5, the last of the 5-bug punch list, fixed and committed)
-**Status:** All 5 bugs from the real-hardware-run punch list are fixed. Next milestone: a clean hardware re-run to confirm the fixes hold outside fake-object test harnesses. Two direction decisions (format pivot, autonomous sourcing) recorded but not yet scoped or implemented.
+**Last updated:** 2026-07-06, full handoff rewrite after bugfix session completion - all 5 bugs fixed and pushed to `main`, home-machine to-do list added, `.env.example`'s outdated caption-font comment corrected
+**Status:** All 5 bugs from the real-hardware-run punch list are fixed and on `main`. Next milestone: work through the HOME MACHINE TO-DO LIST (pull latest, add music files, set `CAPTION_FONT_PATH`), then a clean hardware re-run to confirm the fixes hold outside fake-object test harnesses. Two direction decisions (format pivot, autonomous sourcing) recorded but not yet scoped or implemented - queued behind that re-run.
