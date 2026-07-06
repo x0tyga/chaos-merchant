@@ -61,18 +61,27 @@ class BatchSummaryGenerator:
 
     @staticmethod
     def _aggregate_similarity_check(qc_inner: Dict) -> str:
+        # content_similarity is now one entry PER CLIP (previously a single
+        # shared entry for the whole batch, based only on the first clip's
+        # title - see quality_control.py's VALIDATION 3), so this aggregates
+        # across all of them the same way the other per-video checks do:
+        # worst result wins, with the highest similarity % reported.
         similarity = qc_inner.get('content_similarity', [])
         if not similarity:
             return "⊗ NOT CHECKED"
-        result = similarity[0].get('result', 'UNKNOWN')
-        similarity_pct = similarity[0].get('highest_similarity', 0)
-        if result == 'FAIL':
-            return f"❌ FAIL ({similarity_pct:.0%} similar to recent short)"
-        if result == 'WARN':
-            return f"⚠️ WARN ({similarity_pct:.0%} similar to recent short)"
-        if result == 'SKIP':
+
+        results = [s.get('result', 'UNKNOWN') for s in similarity]
+        highest_pct = max((s.get('highest_similarity', 0) for s in similarity), default=0)
+
+        if any(r == 'FAIL' for r in results):
+            failed = sum(1 for r in results if r == 'FAIL')
+            return f"❌ FAIL ({failed}/{len(results)} clips, up to {highest_pct:.0%} similar to a recent short)"
+        if any(r == 'WARN' for r in results):
+            warned = sum(1 for r in results if r == 'WARN')
+            return f"⚠️ WARN ({warned}/{len(results)} clips, up to {highest_pct:.0%} similar to a recent short)"
+        if all(r == 'SKIP' for r in results):
             return "⊗ SKIPPED (no channel history yet)"
-        return "✅ PASS"
+        return f"✅ PASS ({len(results)}/{len(results)} clips)"
 
     @staticmethod
     def _aggregate_metadata_check(qc_inner: Dict) -> str:

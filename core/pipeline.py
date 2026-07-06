@@ -270,6 +270,60 @@ class Pipeline:
             logger.warning(f"⚠ Failed to load channel history: {e}")
             return []
 
+    def _write_qc_failure_files(self, qc_inner: dict):
+        """
+        Writes one plain-text error file per clip that failed QC (video
+        validation or caption detection) into the output folder, mirroring
+        video_production.py's per-clip production error files - so "why
+        didn't Short 2 make it" has the same answer whether Short 2 failed
+        during PRODUCTION or during QC: a file sitting right next to where
+        its video would have been, not just a line buried in the run's logs.
+        Videos/captions in qc_inner are keyed by 'short_number' (see
+        quality_control.py's _real_short_number mapping), which is what
+        video_production.py's error files are also named after.
+        """
+        by_short = {}
+        for v in qc_inner.get('videos', []):
+            if v.get('validation', {}).get('status') == 'error':
+                num = v.get('short_number', v.get('index'))
+                by_short.setdefault(num, []).append(
+                    f"Video validation FAILED: {'; '.join(v['validation'].get('errors', []))}"
+                )
+        for c in qc_inner.get('captions', []):
+            if c.get('details', {}).get('result') == 'FAIL':
+                num = c.get('short_number', c.get('index'))
+                conf = c.get('details', {}).get('confidence', 0)
+                by_short.setdefault(num, []).append(
+                    f"Caption presence check FAILED: only {conf:.0%} of sampled frames showed "
+                    f"caption-like content (need >=60%)"
+                )
+        for s in qc_inner.get('content_similarity', []):
+            if s.get('result') == 'FAIL':
+                num = s.get('short_number')
+                if num is not None:
+                    by_short.setdefault(num, []).append(
+                        f"Content similarity FAILED: {s.get('highest_similarity', 0):.0%} similar to "
+                        f"recently published short '{(s.get('similar_short') or {}).get('title', '?')}'"
+                    )
+
+        for short_number, reasons in by_short.items():
+            try:
+                error_path = self.output_dir / f"video_{self.video_path.stem}_{short_number:03d}_QC_ERROR.txt"
+                error_path.write_text(
+                    f"SHORT FAILED QUALITY CONTROL\n"
+                    f"=============================\n"
+                    f"Short number: {short_number + 1}\n"
+                    f"Source video: {self.video_path}\n"
+                    f"Checked at: {datetime.now().isoformat()}\n\n"
+                    f"Reason(s):\n" + "\n".join(f"- {r}" for r in reasons) + "\n\n"
+                    f"The video file itself was still produced and packaged - this Short "
+                    f"needs manual review before publishing rather than being silently "
+                    f"dropped. See the QC manifest for full detail on every check run.\n"
+                )
+                logger.info(f"📄 Wrote QC failure explanation: {error_path.name}")
+            except Exception:
+                logger.exception(f"⚠ Could not write QC failure file for short {short_number}")
+
     def run(self):
         """
         Execute the complete pipeline
@@ -494,20 +548,39 @@ class Pipeline:
                 'routing': qc_result.get('routing')
             })
 
+            # NOTE: this used to `raise Exception(...)` here whenever ANY
+            # single clip in the batch failed QC, which aborted the entire
+            # pipeline run before Step 7 ever executed - meaning if 1 of 3
+            # clips had a QC issue (e.g. a caption-detection false positive,
+            # or a content-similarity collision on just that clip's title),
+            # the OTHER 2 good clips never got packaged either. That's
+            # backwards from the documented "route bad content to manual
+            # review" design (see CLAUDE.md's QC section) - manual review
+            # should happen on packaged output, not replace packaging
+            # entirely. QC failures are now logged loudly (with the actual
+            # nested errors, not the wrong top-level key this used to read)
+            # and per-clip QC failure files are written, but the batch
+            # still proceeds to packaging so a bad clip can't take the good
+            # ones down with it.
+            qc_inner = qc_result.get('qc_result', {}) or {}
+            real_errors = qc_inner.get('issues', {}).get('errors', [])
+            self._write_qc_failure_files(qc_inner)
+
             if qc_result.get('status') == 'error':
-                logger.error(f"❌ QC validation failed: {qc_result.get('errors', [])}")
+                logger.error(f"❌ QC validation found {len(real_errors)} error(s) - routing to manual review:")
+                for err in real_errors:
+                    logger.error(f"   - {err}")
                 self.log_step(PipelineStep.QUALITY_CONTROL, 'failed', {
-                    'errors': qc_result.get('errors', []),
+                    'errors': real_errors,
                     'routing': 'manual_review'
                 })
-                raise Exception(f"Quality Control failed: {qc_result.get('errors', [])}")
+            else:
+                self.log_step(PipelineStep.QUALITY_CONTROL, 'complete', {
+                    'status': qc_result.get('status'),
+                    'warnings': len(qc_inner.get('issues', {}).get('warnings', [])),
+                    'routing': qc_result.get('routing')
+                })
 
-            self.log_step(PipelineStep.QUALITY_CONTROL, 'complete', {
-                'status': qc_result.get('status'),
-                'warnings': len(qc_result.get('warnings', [])),
-                'routing': qc_result.get('routing')
-            })
-            
             # Step 7: Output Packaging
             logger.info("Step 7/7: Output Packaging")
             self.log_step(PipelineStep.OUTPUT_PACKAGING, 'in_progress')

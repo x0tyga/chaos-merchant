@@ -1022,20 +1022,35 @@ class VideoProducer:
                 'timestamp': datetime.now().isoformat()
             }
 
+        total = len(top_clip_indices[:7])
         for i, clip_idx in enumerate(top_clip_indices[:7]):
-            logger.info(f"\n--- Producing Short {i+1}/7 (clip index: {clip_idx}) ---")
+            tag = f"[Short {i + 1}/{total}]"
+            logger.info(f"\n--- {tag} Producing (clip index: {clip_idx}) ---")
 
             try:
-                result = self.produce_single_short(clip_idx, i)
-                results.append(result)
+                result = self.produce_single_short(clip_idx, i, total_shorts=total)
             except Exception as e:
-                logger.exception(f"❌ Short {i+1} failed")
-                results.append({
+                logger.exception(f"❌ {tag} failed with an unhandled exception")
+                result = {
                     'status': 'error',
                     'clip_idx': clip_idx,
                     'error': str(e),
                     'short_number': i
-                })
+                }
+            results.append(result)
+
+            # Loud, unambiguous per-clip pass/fail so a clip never just
+            # disappears from the output without a clear reason attached
+            # to it - and a standalone error file in the output folder so
+            # the reason survives even if nobody goes looking through logs.
+            if result.get('status') == 'success':
+                logger.info(f"✅ {tag} PASSED - output: {Path(result.get('output_path', '')).name}")
+            else:
+                reason = result.get('error', 'Unknown error')
+                step = result.get('failed_step')
+                step_note = f" (failed at: {step})" if step else ""
+                logger.error(f"❌ {tag} FAILED{step_note} - clip_idx={clip_idx}, reason: {reason}")
+                self._write_short_error_file(i, clip_idx, reason, step=step, total_shorts=total)
 
         video_paths = [r.get('output_path') for r in results if r.get('status') == 'success']
         timings = {str(r.get('clip_idx')): r.get('duration', 0) for r in results if r.get('status') == 'success'}
@@ -1119,9 +1134,41 @@ class VideoProducer:
             'timestamp': datetime.now().isoformat()
         }
 
-    def produce_single_short(self, clip_idx: int, short_number: int) -> Dict:
+    def _write_short_error_file(self, short_number: int, clip_idx: int, error_message: str,
+                                 step: str = None, total_shorts: int = None):
+        """
+        Writes a plain-text error file into output_dir for any Short that
+        failed production, so a failed clip leaves a clear, discoverable
+        explanation behind in the OUTPUT FOLDER ITSELF instead of just
+        disappearing - the previous behavior (log a traceback, drop the
+        clip from video_paths) meant "why did I only get 5 of 7 shorts"
+        could only be answered by finding and reading the full run's logs.
+        """
+        try:
+            error_path = self.output_dir / f"video_{self.source_video_path.stem}_{short_number:03d}_ERROR.txt"
+            of_total = f" of {total_shorts}" if total_shorts else ""
+            error_path.write_text(
+                f"SHORT PRODUCTION FAILED\n"
+                f"========================\n"
+                f"Short number: {short_number + 1}{of_total}\n"
+                f"Clip index (in clip manifest): {clip_idx}\n"
+                f"Source video: {self.source_video_path}\n"
+                f"Failed at: {datetime.now().isoformat()}\n"
+                f"Failed step: {step or 'unknown'}\n\n"
+                f"Reason:\n{error_message}\n\n"
+                f"This Short was skipped - no video file was produced for it. "
+                f"Search the pipeline logs for 'Short {short_number + 1}' around "
+                f"the timestamp above for the full traceback.\n"
+            )
+            logger.info(f"📄 Wrote error explanation: {error_path.name}")
+        except Exception:
+            logger.exception(f"⚠ Could not write error file for Short {short_number + 1}")
+
+    def produce_single_short(self, clip_idx: int, short_number: int, total_shorts: int = None) -> Dict:
         """Produce one finished short with Phase 2 features"""
         start_time = datetime.now()
+        tag = f"[Short {short_number + 1}{f'/{total_shorts}' if total_shorts else ''}]"
+        current_step = "initialization"
 
         try:
             clips = self.clip_manifest.get('clips', [])
@@ -1132,7 +1179,8 @@ class VideoProducer:
             clip_start = clip_data.get('start_time', 0)
             clip_end = clip_data.get('end_time', clip_data.get('duration', 0))
 
-            logger.info(f"Step 1: Extracting clip ({clip_start:.1f}s - {clip_end:.1f}s)...")
+            current_step = "1: clip extraction"
+            logger.info(f"{tag} Step 1: Extracting clip ({clip_start:.1f}s - {clip_end:.1f}s)...")
             extractor = ClipExtractor(str(self.source_video_path))
             extracted_clip = extractor.extract_clip(clip_start, clip_end)
 
@@ -1146,11 +1194,13 @@ class VideoProducer:
             extracted_clip = extracted_clip.without_audio()
             logger.info("✓ Source audio stripped (final mix = voiceover + background music only)")
 
-            logger.info(f"Step 2: Reframing to 9:16 vertical...")
+            current_step = "2: vertical reframe"
+            logger.info(f"{tag} Step 2: Reframing to 9:16 vertical...")
             aspect = VerticalReframer.detect_aspect_ratio(extracted_clip)
             method = 'crop' if aspect == '16:9' else 'letterbox'
             reframed_clip = VerticalReframer.reframe(extracted_clip, method=method)
 
+            current_step = "voiceover lookup"
             if short_number >= len(self.voiceover_results):
                 raise IndexError(f"No voiceover result available for short {short_number}")
             clip_voiceover = self.voiceover_results[short_number]
@@ -1162,7 +1212,8 @@ class VideoProducer:
                 )
             clip_script = clip_voiceover.get('script', {}).get('full_script', '')
 
-            logger.info(f"Step 3: Preparing audio (voiceover + background music, source audio excluded)...")
+            current_step = "3: audio preparation"
+            logger.info(f"{tag} Step 3: Preparing audio (voiceover + background music, source audio excluded)...")
             clip_duration = reframed_clip.duration
             audio_processor = AudioProcessor(clip_voiceover['voiceover']['audio_path'])
             voiceover_audio = audio_processor.load_voiceover()
@@ -1195,7 +1246,8 @@ class VideoProducer:
 
             reframed_clip = reframed_clip.with_audio(final_audio)
 
-            logger.info(f"Step 4: Adding burned-in captions...")
+            current_step = "4: caption rendering"
+            logger.info(f"{tag} Step 4: Adding burned-in captions...")
             caption_sync = CaptionSynchronizer(clip_script)
             caption_timeline = caption_sync.generate_caption_timeline(voiceover_audio.duration)
             captioned_clip = caption_sync.render_captions(reframed_clip, caption_timeline)
@@ -1207,12 +1259,14 @@ class VideoProducer:
             # every helper's return type.
             captions_applied = captioned_clip is not reframed_clip
 
-            logger.info(f"Step 5: Applying color grading...")
+            current_step = "5: color grading"
+            logger.info(f"{tag} Step 5: Applying color grading...")
             effects = EffectsLayer()
             graded_clip = effects.apply_color_grading(captioned_clip, contrast=1.2, saturation=1.1)
             color_grading_applied = graded_clip is not captioned_clip
 
-            logger.info(f"Step 6: Adding channel branding...")
+            current_step = "6: branding"
+            logger.info(f"{tag} Step 6: Adding channel branding...")
             branded_clip = BrandingOverlay.apply_branding(graded_clip, self.channel_name)
             branding_applied = branded_clip is not graded_clip
 
@@ -1240,10 +1294,12 @@ class VideoProducer:
             output_name = f"video_{self.source_video_path.stem}_{short_number:03d}.mp4"
             output_path = self.output_dir / output_name
 
-            logger.info(f"Step 7: Exporting MP4...")
+            current_step = "7: MP4 export"
+            logger.info(f"{tag} Step 7: Exporting MP4...")
             exporter = VideoExporter()
             export_path = exporter.export_mp4(branded_clip, str(output_path), preset='ultrafast')
 
+            current_step = "output validation"
             is_valid = exporter.validate_output(export_path)
 
             # Don't trust that captions compositing succeeded in-process -
@@ -1305,6 +1361,7 @@ class VideoProducer:
                     'clip_idx': clip_idx,
                     'short_number': short_number,
                     'error': 'Output validation failed',
+                    'failed_step': current_step,
                     'processing_time': elapsed,
                     'features': applied_features,
                     'features_requested': ['captions', 'audio_ducking', 'color_grading', 'branding'],
@@ -1312,12 +1369,13 @@ class VideoProducer:
                 }
 
         except Exception as e:
-            logger.exception(f"❌ Short {short_number} production failed")
+            logger.exception(f"❌ {tag} production failed at step '{current_step}'")
             return {
                 'status': 'error',
                 'clip_idx': clip_idx,
                 'short_number': short_number,
                 'error': str(e),
+                'failed_step': current_step,
                 'processing_time': (datetime.now() - start_time).total_seconds()
             }
 

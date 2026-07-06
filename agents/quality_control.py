@@ -23,6 +23,14 @@ try:
 except ImportError:
     raise ImportError("moviepy and numpy required: pip install moviepy numpy")
 
+try:
+    # Read the real caption position constant from where captions are
+    # actually placed, instead of a second hardcoded guess in this file
+    # that can silently drift out of sync (see CaptionValidator below).
+    from agents.video_production import CaptionSynchronizer as _CaptionSynchronizer
+except ImportError:
+    _CaptionSynchronizer = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -287,10 +295,26 @@ class CaptionValidator:
                 try:
                     frame = clip.get_frame(t)
 
-                    # Check bottom center region (where captions typically appear)
-                    # Bottom 15% of frame, center 80% of width
+                    # Check the region captions are actually placed in -
+                    # center 80% of width, spanning from just above
+                    # CaptionSynchronizer.CAPTION_TOP_RATIO (80% down from
+                    # the top, per the Bug 3 fix) to the bottom of the
+                    # frame. This USED to be hardcoded to the bottom 15%
+                    # of the frame, which was the right band for the OLD
+                    # caption position (video_clip.h - 160px) but silently
+                    # fell out of sync with Bug 3's fix moving captions up
+                    # to 80% from the top - on a 1920px-tall frame that's
+                    # a caption box that can sit entirely above y=1632
+                    # (the old region's top edge), causing this check to
+                    # report FAIL ("no captions detected") on videos that
+                    # genuinely have captions, just higher up on screen.
+                    # Reading the real constant here instead of a second,
+                    # independently-hardcoded guess keeps the two in sync
+                    # if the position ever changes again.
                     h, w = frame.shape[:2]
-                    caption_region = frame[int(h * 0.85):h, int(w * 0.1):int(w * 0.9)]
+                    caption_top_ratio = getattr(_CaptionSynchronizer, 'CAPTION_TOP_RATIO', 0.80)
+                    region_top = max(0.0, caption_top_ratio - 0.05)
+                    caption_region = frame[int(h * region_top):h, int(w * 0.1):int(w * 0.9)]
 
                     # Detect white or high-contrast text on dark background
                     # Look for pixels with high brightness (text) or high contrast edges
@@ -743,11 +767,26 @@ class QualityController:
         logger.info("-" * 70)
         video_paths = video_manifest.get('video_paths', [])
 
+        # video_paths is a FILTERED list (successful shorts only - see
+        # video_production.py's produce_all_shorts()), so positional index
+        # `i` here does NOT reliably equal the real short_number once any
+        # short upstream failed (e.g. index 1 in video_paths could actually
+        # be Short 3 if Short 2 failed production). short_results carries
+        # the real mapping; without it, log messages and per-clip QC files
+        # would misattribute results to the wrong clip whenever the batch
+        # is partial.
+        short_results = video_manifest.get('short_results', [])
+
+        def _real_short_number(i: int) -> int:
+            return short_results[i]['short_number'] if i < len(short_results) else i
+
         for i, video_path in enumerate(video_paths):
+            real_num = _real_short_number(i)
             if Path(video_path).exists():
                 validation = VideoValidator.validate_video(video_path)
                 results['videos'].append({
                     'index': i,
+                    'short_number': real_num,
                     'path': video_path,
                     'validation': validation
                 })
@@ -755,17 +794,17 @@ class QualityController:
                 # Log all checks with pass/fail status
                 for check in validation.get('checks', []):
                     status_icon = "✓" if check['result'] == 'PASS' else ("⚠" if check['result'] == 'WARN' else "❌")
-                    logger.info(f"  {status_icon} Video {i} - {check['check']}: {check['found']} (expected: {check['expected']})")
+                    logger.info(f"  {status_icon} Short {real_num + 1} - {check['check']}: {check['found']} (expected: {check['expected']})")
 
                 if validation['status'] == 'error':
-                    results['issues']['errors'].extend([f"Video {i}: {e}" for e in validation['errors']])
+                    results['issues']['errors'].extend([f"Short {real_num + 1}: {e}" for e in validation['errors']])
                     results['status'] = 'error'
                 elif validation['status'] == 'warning':
-                    results['issues']['warnings'].extend([f"Video {i}: {w}" for w in validation['warnings']])
+                    results['issues']['warnings'].extend([f"Short {real_num + 1}: {w}" for w in validation['warnings']])
                     if results['status'] != 'error':
                         results['status'] = 'warning'
             else:
-                error_msg = f"Video file not found: {video_path}"
+                error_msg = f"Short {real_num + 1}: video file not found: {video_path}"
                 results['issues']['errors'].append(error_msg)
                 results['status'] = 'error'
                 logger.error(f"❌ {error_msg}")
@@ -779,20 +818,22 @@ class QualityController:
         logger.info("-" * 70)
 
         for i, video_path in enumerate(video_paths):
+            real_num = _real_short_number(i)
             if Path(video_path).exists():
                 has_captions, caption_details = CaptionValidator.has_caption_content(video_path)
                 results['captions'].append({
                     'index': i,
+                    'short_number': real_num,
                     'path': video_path,
                     'details': caption_details
                 })
 
                 status_icon = "✓" if caption_details['result'] == 'PASS' else ("⚠" if caption_details['result'] == 'WARN' else "❌")
-                logger.info(f"  {status_icon} Video {i} - Caption check: {caption_details['result']}")
+                logger.info(f"  {status_icon} Short {real_num + 1} - Caption check: {caption_details['result']}")
                 logger.info(f"     Frames sampled: {caption_details['frames_sampled']}, frames with text: {caption_details['frames_with_text']}, confidence: {caption_details['confidence']:.1%}")
 
                 if caption_details['result'] == 'FAIL':
-                    error_msg = f"Video {i}: Captions not detected in video frames (required for Phase 2 production)"
+                    error_msg = f"Short {real_num + 1}: captions not detected in video frames (required for Phase 2 production)"
                     results['issues']['errors'].append(error_msg)
                     results['status'] = 'error'
                     logger.error(f"❌ {error_msg}")
@@ -800,37 +841,61 @@ class QualityController:
         logger.info(f"✓ Caption validation complete: {len(results['captions'])} videos checked\n")
 
         # ============================================================
-        # VALIDATION 3: CONTENT SIMILARITY (last 14 days)
+        # VALIDATION 3: CONTENT SIMILARITY (last 14 days) - PER CLIP
         # ============================================================
-        logger.info("🔄 VALIDATION 3: Content Similarity Check (last 14 days)")
+        # Previously ran ONCE against seo_manifest.get('best_title') - which
+        # pipeline.py only ever populates from the FIRST successful clip's
+        # SEO result (see the 'first_success' fallback in core/pipeline.py).
+        # That meant a title collision on clip 1 alone could flag the
+        # entire batch's similarity check, while clips 2 and 3's genuinely
+        # distinct topics were never actually evaluated on their own merits
+        # - exactly the kind of "failing for a fixable/wrong reason" this
+        # was checked for. Now runs once per clip against that CLIP's own
+        # title/keywords from seo_manifest['per_clip'].
+        logger.info("🔄 VALIDATION 3: Content Similarity Check (last 14 days, per clip)")
         logger.info("-" * 70)
 
         current_seo_filename = f"{video_base_name}_seo_metadata.json" if video_base_name else None
-        is_unique, similarity_details = ContentSimilarityValidator.check_topic_similarity(
-            seo_manifest, str(self.output_dir), exclude_filename=current_seo_filename
-        )
-        results['content_similarity'].append(similarity_details)
+        per_clip_seo = seo_manifest.get('per_clip', [])
 
-        status_icon = "✓" if similarity_details['result'] == 'PASS' else ("⚠" if similarity_details['result'] == 'WARN' else ("❌" if similarity_details['result'] == 'FAIL' else "⊗"))
-        logger.info(f"  {status_icon} Topic uniqueness: {similarity_details['result']}")
-        logger.info(f"     Shorts checked (14-day window): {similarity_details['recent_shorts_checked']}")
-        logger.info(f"     Highest similarity: {similarity_details['highest_similarity']:.1%}")
-        if similarity_details.get('similar_short'):
-            logger.info(f"     Most similar: '{similarity_details['similar_short']['title']}'")
+        for i, video_path in enumerate(video_paths):
+            real_num = _real_short_number(i)
+            clip_seo = per_clip_seo[real_num] if real_num < len(per_clip_seo) else {}
 
-        if similarity_details['result'] == 'FAIL':
-            error_msg = f"Content too similar to recent short: {similarity_details['highest_similarity']:.1%} similarity detected"
-            results['issues']['errors'].append(error_msg)
-            results['status'] = 'error'
-            logger.error(f"❌ {error_msg}")
-        elif similarity_details['result'] == 'WARN':
-            warning_msg = f"Content somewhat similar to recent short: {similarity_details['highest_similarity']:.1%} similarity"
-            results['issues']['warnings'].append(warning_msg)
-            if results['status'] != 'error':
-                results['status'] = 'warning'
-            logger.warning(f"⚠ {warning_msg}")
+            if clip_seo.get('status') != 'success':
+                # This clip's SEO generation itself failed - that's already
+                # surfaced by the SEO metadata validation below; nothing to
+                # compare here, and it must not be silently treated as a
+                # similarity pass OR fail for this clip.
+                logger.info(f"  ⊗ Short {real_num + 1} - Topic uniqueness: SKIPPED (no SEO result to compare)")
+                continue
 
-        logger.info(f"✓ Content similarity check complete\n")
+            is_unique, similarity_details = ContentSimilarityValidator.check_topic_similarity(
+                clip_seo, str(self.output_dir), exclude_filename=current_seo_filename
+            )
+            similarity_details['short_number'] = real_num
+            results['content_similarity'].append(similarity_details)
+
+            status_icon = "✓" if similarity_details['result'] == 'PASS' else ("⚠" if similarity_details['result'] == 'WARN' else ("❌" if similarity_details['result'] == 'FAIL' else "⊗"))
+            logger.info(f"  {status_icon} Short {real_num + 1} - Topic uniqueness: {similarity_details['result']}")
+            logger.info(f"     Shorts checked (14-day window): {similarity_details['recent_shorts_checked']}")
+            logger.info(f"     Highest similarity: {similarity_details['highest_similarity']:.1%}")
+            if similarity_details.get('similar_short'):
+                logger.info(f"     Most similar: '{similarity_details['similar_short']['title']}'")
+
+            if similarity_details['result'] == 'FAIL':
+                error_msg = f"Short {real_num + 1}: content too similar to recent short ({similarity_details['highest_similarity']:.1%} similarity)"
+                results['issues']['errors'].append(error_msg)
+                results['status'] = 'error'
+                logger.error(f"❌ {error_msg}")
+            elif similarity_details['result'] == 'WARN':
+                warning_msg = f"Short {real_num + 1}: content somewhat similar to recent short ({similarity_details['highest_similarity']:.1%} similarity)"
+                results['issues']['warnings'].append(warning_msg)
+                if results['status'] != 'error':
+                    results['status'] = 'warning'
+                logger.warning(f"⚠ {warning_msg}")
+
+        logger.info(f"✓ Content similarity check complete: {len(results['content_similarity'])} clips checked\n")
 
         # ============================================================
         # VALIDATION 4: METADATA COMPLETENESS
