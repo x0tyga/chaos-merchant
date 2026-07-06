@@ -1,10 +1,12 @@
 # CHAOS MERCHANT - PROJECT HANDOFF DOCUMENT
 
 **Current Date:** 2026-07-06
-**Branch:** `claude/github-abundant-aho-c2btu7` (kept in sync 1:1 with `main` - every fix this session pushed to both)
-**Current model:** `claude-sonnet-5` (switched mid-session from `claude-fable-5`, which was used for Bugs 1 and 2)
-**Status:** First real-hardware run happened and produced broken output (1 MP4 instead of 7, ~7s unformatted video, no captions/effects/branding). Working through a 5-bug punch list from that run, one at a time, with a debrief + individual push to `main` after each fix. Bugs 1 and 2 fixed and pushed. Bugs 3-5 still outstanding.
-**Next Action:** Resume Bug 3 (captions cut off at bottom of screen) - see "BUGS STILL OUTSTANDING" below for the exact spec. Do not skip ahead to Bug 4/5 without going through Bug 3 first, per the user's explicit one-at-a-time process.
+**Branch:** `claude/session-handoff-review-bawvji` (this session's designated branch; the prior session's `claude/github-abundant-aho-c2btu7` branch/main-sync claim could not be verified against `origin/main`, which is still at the repo's initial commit - see note below)
+**Current model:** `claude-sonnet-5`
+**Status:** First real-hardware run happened and produced broken output (1 MP4 instead of 7, ~7s unformatted video, no captions/effects/branding). Working through a 5-bug punch list from that run, one at a time, with a debrief + individual push after each fix. Bugs 1, 2, and 3 fixed and committed on this branch. Bugs 4-5 still outstanding.
+**Next Action:** Resume Bug 4 (video goes black/silent after 30s) - see "BUGS STILL OUTSTANDING" below. Do not skip ahead to Bug 5 without going through Bug 4 first, per the user's explicit one-at-a-time process.
+
+**Branch/remote note:** at the start of this resumed session, `origin/main` was found to only contain the repo's "Initial commit" - it does not contain the Bug 1/2 commits this HANDOFF's prior version claimed were pushed to `main`. Those commits (and this session's Bug 3 commit) exist on `claude/session-handoff-review-bawvji`. Confirm with the user where they actually want this branch merged/pushed before assuming `main` is in sync.
 
 ---
 
@@ -31,6 +33,16 @@ Verified via direct measurement of the real render callback (scalar and moviepy'
 
 Both fixes are in `agents/video_production.py` only. `.env.example` gained `BACKGROUND_MUSIC_DIR`, `MUSIC_BASE_DB`, `MUSIC_DUCK_DB`. A new `assets/music/README.md` documents the folder's usage.
 
+**Bug 3 - Captions cut off at the bottom of the screen.**
+Root cause was two layers deep. The obvious one: `render_captions()` hardcoded caption position to `video_clip.h - SAFE_MARGIN - 100` (a flat 160px from the bottom regardless of frame height), which overflows for taller/multi-line captions. The deeper one, found while tracing the pipeline per the spec: moviepy 2.x's `TextClip` renders via Pillow directly and, unlike moviepy 1.x's ImageMagick-backed version, has **no built-in default font** - a missing/invalid `font` path makes every `TextClip` construction raise. The previous code only passed `font` to `TextClip` when `CAPTION_FONT_PATH` was set in `.env`; on a machine without that env var, every single caption segment would silently fail (each exception logged individually via `logger.exception`, but with no aggregate signal) and the video would export fine, just with zero captions. This is almost certainly the deeper explanation for "no captions" in the original broad bug report, not just the position cutoff.
+Fix:
+1. Position: captions now anchor at **80% down from the top of the frame**, clamped so the caption's own rendered height never pushes its bottom edge closer than **80px** to the bottom edge.
+2. Font: new `_resolve_font_path()` tries `CAPTION_FONT_PATH` first, then falls back through a real candidate list (DejaVu/Liberation on Linux - the same DejaVu path `BrandingOverlay`'s watermark code already assumes exists - then common macOS system font paths). If nothing is found, logs one loud, actionable error at construction time instead of the loop repeating the identical failure per segment.
+3. Silent-failure fixes: `render_captions()` now distinctly logs "ALL segments failed" vs "N of M segments failed" instead of relying on per-segment exception logs alone to convey that.
+4. Post-export verification: new `CaptionSynchronizer.verify_captions_in_export()` reopens the finished MP4 and samples frames at caption-active timestamps, checking for bright pixels inside the exact band captions were placed in (tracked via `self.last_caption_band`) - mirrors the "verify the artifact, don't trust the writer" pattern already used for `VideoExporter.export_mp4()`'s atomic-write fix. Wired into `produce_single_short()`: a short whose captions composited in-process but didn't survive to the actual export file now gets a clear error logged and is excluded from that short's `'captions'` applied-features entry.
+Verified via a fake-object harness (moviepy/numpy/PIL stubbed enough to import the module; the sandbox's real DejaVu font was exercised through the actual fallback chain): font resolution across env-var-set/env-var-missing/nothing-found paths, `render_captions()` refusing to loop through every segment when no font resolved, y-position clamping across short/medium/very-tall captions (with a regression check proving the *old* formula could push a tall caption's bottom edge past the frame entirely), and `verify_captions_in_export()`'s band detection against synthetic bright/dark frames plus its empty-timeline and no-band short-circuits.
+Change is in `agents/video_production.py` only (`CaptionSynchronizer` class and the caption step of `produce_single_short()`).
+
 ### Assets needed before these can be tested for real
 
 **`assets/music/` currently contains only a README - no actual audio files.** Bugs 1 and 2 cannot be meaningfully tested on real hardware until royalty-free music tracks are actually dropped into that folder (supported formats: `.mp3/.wav/.m4a/.aac/.ogg/.flac`). Without any tracks present, `BackgroundMusicLibrary.load_for_short()` degrades to `None` and the pipeline runs voiceover-only - which will falsely look like Bug 1 is "fixed" (no source audio, but also no music) without actually exercising the ducking/base-level logic in Bug 2 at all.
@@ -41,23 +53,7 @@ Both fixes are in `agents/video_production.py` only. `.env.example` gained `BACK
 
 Work resumes here, in this order, one at a time, with a debrief + individual push after each.
 
-### Bug 3 - Captions cut off at the bottom of the screen (up next)
-
-**Current spec (this supersedes the original bug list's "85% from top" - the user refined it when giving the go-ahead):** move caption position up so captions sit at **80% from the top of the frame**, with a **minimum 80px margin from the bottom edge**.
-
-Also required in the same pass:
-- Full trace of the caption pipeline in `agents/video_production.py`'s `CaptionSynchronizer` class, from text generation (`generate_caption_timeline()`) through burned-in frame rendering (`render_captions()`), to confirm captions are genuinely appearing in the exported MP4 - not just processed and silently dropped.
-- Fix any conditions where captions fail silently and the video exports without them.
-- Check that the caption font is actually available on macOS, and that ImageMagick's policy isn't blocking text rendering (a known moviepy/ImageMagick gotcha - `TextClip` shells out to ImageMagick's `convert`, which ships with a default security policy that blocks text/label operations on many Linux distros and can also bite on macOS installs).
-- Add a post-export verification step that samples frames from the finished video and confirms caption pixels are actually present (mirrors the same "don't trust the writer, verify the artifact" pattern already used for `VideoExporter.export_mp4()`'s atomic-write fix).
-
-**Investigation status:** just started, paused immediately by the user's "stop everything" interrupt for this HANDOFF.md update. Only code reading has happened so far - zero edits made. The exact line identified as the root of the current cutoff is in `render_captions()`:
-```python
-text_clip.with_position(('center', video_clip.h - self.SAFE_MARGIN - 100))
-```
-This hardcodes captions 160px up from the bottom (`SAFE_MARGIN=60` + a flat `100`), regardless of video height - it needs to become a calculation anchored at 80% of `video_clip.h` from the top, clamped so it never sits closer than 80px to the bottom edge. ImageMagick policy, macOS font availability, silent-failure paths, and post-export frame verification have not been investigated yet at all.
-
-### Bug 4 - Video goes black and silent after 30 seconds despite the clip being longer
+### Bug 4 - Video goes black and silent after 30 seconds despite the clip being longer (up next)
 
 Root cause not yet investigated. Per the original bug report: there's a duration mismatch between the video clip and the voiceover - something in the pipeline is reconciling the two by cutting the video down to the voiceover's length instead of letting the video play its full duration with voiceover covering only its own generated portion. Needs tracing through wherever clip duration and voiceover duration currently get reconciled in `agents/video_production.py` (likely in `produce_single_short()` or `AudioProcessor`/`CompositeVideoClip` duration handling) and a fix so the video always plays its full intended duration.
 
@@ -95,9 +91,9 @@ No design work has been done yet on sourcing criteria (what makes a video worth 
 ## HOW TO RESUME THIS PROJECT
 
 1. Read this HANDOFF.md top to bottom - it reflects the exact current state as of the interrupt that triggered this update.
-2. `git log --oneline -15` and `git status` to confirm exactly which fixes have landed on `main`.
-3. If the user hasn't given the go-ahead for Bug 3 yet, don't start it - the standing process for this bug list is one bug at a time, debrief, individual push, then wait for explicit go-ahead.
-4. If Bug 3 is already underway or done per git log, move to Bug 4, then Bug 5, in that order.
+2. `git log --oneline -15` and `git status` to confirm exactly which fixes have landed, and on which branch/remote - see the "Branch/remote note" at the top; don't assume `main` is in sync without checking.
+3. If the user hasn't given the go-ahead for Bug 4 yet, don't start it - the standing process for this bug list is one bug at a time, debrief, individual push, then wait for explicit go-ahead.
+4. If Bug 4 is already underway or done per git log, move to Bug 5.
 5. Once all 5 bugs are fixed and the user has real music files in `assets/music/`, the next real milestone is another clean hardware run to confirm Bugs 1-5 actually resolved what was seen in production, not just in mocks.
 6. The format-template pivot and autonomous clip-sourcing decisions are queued behind the bug list - don't start scoping either until the user explicitly asks for it.
 
@@ -106,5 +102,5 @@ No design work has been done yet on sourcing criteria (what makes a video worth 
 ## DOCUMENT META
 
 **Document created:** 2026-07-02
-**Last updated:** 2026-07-06, mid-bugfix-session (Bugs 1 and 2 of a 5-bug punch list fixed and pushed; Bug 3 investigation paused on explicit user interrupt to update this document)
-**Status:** Active bug-fixing session in progress. Bugs 1-2 fixed, Bugs 3-5 outstanding, two direction decisions (format pivot, autonomous sourcing) recorded but not yet scoped or implemented.
+**Last updated:** 2026-07-06, mid-bugfix-session (Bug 3 of a 5-bug punch list fixed and committed; Bugs 4-5 next)
+**Status:** Active bug-fixing session in progress. Bugs 1-3 fixed, Bugs 4-5 outstanding, two direction decisions (format pivot, autonomous sourcing) recorded but not yet scoped or implemented.
