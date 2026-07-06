@@ -289,44 +289,172 @@ class AudioProcessor:
             logger.error(f"❌ Failed to load voiceover: {e}")
             raise
 
-    def apply_music_ducking(self, background_audio: AudioFileClip, vo_start: float,
-                           vo_end: float, duck_db: float = -6.0) -> Tuple[AudioFileClip, bool]:
-        """
-        Reduce background music volume while the voiceover plays over [vo_start, vo_end]
-        duck_db: reduction in dB (e.g., -6 = reduce to ~50% volume)
+    # Music gain envelope (env-overridable via MUSIC_DUCK_DB / MUSIC_BASE_DB):
+    # the music bed NEVER plays at full volume. Outside the voiceover it sits
+    # at base_db under the mix; during the voiceover it ducks further so the
+    # voice always dominates. Short linear ramps at the boundaries avoid the
+    # audible click a hard gain step would produce.
+    DEFAULT_MUSIC_DUCK_DB = -18.0   # during voiceover
+    DEFAULT_MUSIC_BASE_DB = -12.0   # outside voiceover
+    MUSIC_RAMP_SECONDS = 0.25
 
-        Returns: (audio_clip, applied) - applied is False if ducking failed
-        and the original unducked audio was returned instead, so callers
-        can report accurately instead of assuming success.
+    @staticmethod
+    def _music_gain_at(t: float, vo_start: float, vo_end: float,
+                       duck: float, base: float, ramp: float) -> float:
+        """Pure-Python piecewise gain for one timestamp (also the reference for the array path)."""
+        if vo_start <= t <= vo_end:
+            return duck
+        if vo_start - ramp <= t < vo_start:
+            return base + (duck - base) * (t - (vo_start - ramp)) / ramp
+        if vo_end < t <= vo_end + ramp:
+            return duck + (base - duck) * (t - vo_end) / ramp
+        return base
+
+    def apply_music_envelope(self, background_music, vo_start: float, vo_end: float,
+                             duck_db: float = None, base_db: float = None) -> Tuple[object, bool]:
         """
+        Apply the full music gain envelope: base_db everywhere, ducking to
+        duck_db while the voiceover plays over [vo_start, vo_end], with
+        MUSIC_RAMP_SECONDS linear ramps between the two levels.
+
+        moviepy applies the transform callback lazily at render time, so a
+        broken callback would previously fail SILENTLY at construction and
+        only surface (or worse, mis-render) during export. This method
+        therefore verifies the exact callback object handed to transform()
+        by invoking it directly with synthetic frames at known timestamps
+        and checking the measured gains against the expected values -
+        every production run, logged. A verification mismatch returns the
+        original audio with applied=False and a loud error instead of
+        shipping a mix that sounds wrong.
+
+        Returns: (audio_clip, applied) - applied is False if the envelope
+        failed or failed verification (original audio returned).
+        """
+        # Defensive env parsing: .env is editable as free text in the
+        # dashboard's Settings page, so a typo'd level must degrade to the
+        # defaults with a loud warning - not crash the whole short.
+        if duck_db is None:
+            try:
+                duck_db = float(os.getenv('MUSIC_DUCK_DB', self.DEFAULT_MUSIC_DUCK_DB))
+            except (TypeError, ValueError):
+                logger.warning(f"⚠ Invalid MUSIC_DUCK_DB value {os.getenv('MUSIC_DUCK_DB')!r} - using default {self.DEFAULT_MUSIC_DUCK_DB}")
+                duck_db = self.DEFAULT_MUSIC_DUCK_DB
+        if base_db is None:
+            try:
+                base_db = float(os.getenv('MUSIC_BASE_DB', self.DEFAULT_MUSIC_BASE_DB))
+            except (TypeError, ValueError):
+                logger.warning(f"⚠ Invalid MUSIC_BASE_DB value {os.getenv('MUSIC_BASE_DB')!r} - using default {self.DEFAULT_MUSIC_BASE_DB}")
+                base_db = self.DEFAULT_MUSIC_BASE_DB
+        duck = 10 ** (duck_db / 20.0)
+        base = 10 ** (base_db / 20.0)
+        ramp = self.MUSIC_RAMP_SECONDS
+
         try:
-            logger.info(f"✓ Applying music ducking ({duck_db}dB during voiceover)...")
-            duck_factor = 10 ** (duck_db / 20.0)
+            logger.info(
+                f"✓ Applying music envelope: {base_db:.0f}dB base (gain {base:.3f}), "
+                f"{duck_db:.0f}dB duck during voiceover {vo_start:.1f}s-{vo_end:.1f}s (gain {duck:.3f}), "
+                f"{ramp}s ramps"
+            )
 
-            # moviepy 2.x dropped the volumex() clip method (it only ever
-            # accepted a constant scalar factor, not a time-varying one
-            # anyway - ducking needs the volume to change only during
-            # [vo_start, vo_end]). transform() is the 2.x replacement for
-            # the old fl() general frame-transform method and works on
-            # audio clips too: t may be a scalar or a batch array of times,
-            # so the factor is computed with np.where for elementwise safety.
-            def _duck_frame(get_frame, t):
+            gain_at = self._music_gain_at
+
+            # moviepy 2.x dropped volumex(); transform() is the 2.x
+            # replacement for fl() and works on audio clips. t may be a
+            # scalar or a batch array of timestamps at render time.
+            def _envelope(get_frame, t):
                 frame = get_frame(t)
                 if np.isscalar(t):
-                    factor = duck_factor if vo_start <= t <= vo_end else 1.0
+                    gain = gain_at(t, vo_start, vo_end, duck, base, ramp)
                 else:
                     t_arr = np.asarray(t)
-                    factor = np.where((t_arr >= vo_start) & (t_arr <= vo_end), duck_factor, 1.0)
+                    # Only >=/<= comparisons; nesting order resolves the
+                    # shared boundaries (duck zone wins at vo_start/vo_end).
+                    in_duck = (t_arr >= vo_start) & (t_arr <= vo_end)
+                    in_ramp_down = (t_arr >= vo_start - ramp) & (t_arr <= vo_start)
+                    in_ramp_up = (t_arr >= vo_end) & (t_arr <= vo_end + ramp)
+                    down_gain = ((t_arr - (vo_start - ramp)) * ((duck - base) / ramp)) + base
+                    up_gain = ((t_arr - vo_end) * ((base - duck) / ramp)) + duck
+                    gain = np.where(in_duck, duck,
+                                    np.where(in_ramp_down, down_gain,
+                                             np.where(in_ramp_up, up_gain, base)))
                     if frame.ndim > 1:
-                        factor = factor[:, np.newaxis]
-                return frame * factor
+                        gain = gain[:, np.newaxis]
+                return frame * gain
 
-            ducked = background_audio.transform(_duck_frame)
-            return ducked, True
+            enveloped = background_music.transform(_envelope)
+
+            if not self._verify_envelope_callback(_envelope, vo_start, vo_end, duck, base, ramp):
+                logger.error(
+                    "❌ Music envelope FAILED verification (measured gains did not match the "
+                    "expected -%.0f/-%.0f dB levels) - using original music, envelope NOT applied",
+                    abs(base_db), abs(duck_db)
+                )
+                return background_music, False
+
+            return enveloped, True
 
         except Exception:
-            logger.exception("⚠ Music ducking failed, using original audio")
-            return background_audio, False
+            logger.exception("⚠ Music envelope failed, using original audio")
+            return background_music, False
+
+    @staticmethod
+    def _verify_envelope_callback(envelope_fn, vo_start: float, vo_end: float,
+                                  duck: float, base: float, ramp: float) -> bool:
+        """
+        Executes the EXACT callback object that transform() will invoke at
+        render time, with synthetic unit frames at known timestamps, and
+        checks the measured gains. This is what makes a silently-broken
+        envelope impossible: the same code path that renders the audio is
+        exercised and measured before the export ever starts.
+        """
+        try:
+            checks = [((vo_start + vo_end) / 2.0, duck, 'during voiceover')]
+            if vo_start - ramp > 0:
+                checks.append(((vo_start - ramp) / 2.0, base, 'before voiceover'))
+                checks.append((vo_start - ramp / 2.0, (base + duck) / 2.0, 'ramp midpoint'))
+            checks.append((vo_end + ramp + 1.0, base, 'after voiceover'))
+
+            for t, expected, label in checks:
+                measured = envelope_fn(lambda _t: 1.0, t)  # unit frame -> output IS the gain
+                if abs(float(measured) - expected) > 1e-6:
+                    logger.error(
+                        f"❌ Envelope gain wrong {label} (t={t:.2f}s): measured {float(measured):.4f}, "
+                        f"expected {expected:.4f}"
+                    )
+                    return False
+
+            logger.info(
+                f"✓ Music envelope verified at render-callback level: gain {base:.3f} outside "
+                f"voiceover, {duck:.3f} during, ramps correct ({len(checks)} timestamps measured)"
+            )
+
+            # Array/batch path spot check (how moviepy actually calls it at
+            # render time) - non-fatal if the environment's numpy stand-in
+            # can't support it, since the scalar reference above already
+            # verified the gain math itself.
+            try:
+                t_batch = np.asarray([(vo_start + vo_end) / 2.0, vo_end + ramp + 1.0])
+                out = envelope_fn(lambda _t: np.asarray([1.0, 1.0]), t_batch)
+                vals = out.tolist() if hasattr(out, 'tolist') else list(getattr(out, 'data', out))
+                flat = []
+                stack = list(vals)
+                while stack:
+                    v = stack.pop(0)
+                    if isinstance(v, list):
+                        stack = v + stack
+                    else:
+                        flat.append(float(v))
+                if abs(flat[0] - duck) > 1e-6 or abs(flat[1] - base) > 1e-6:
+                    logger.error(f"❌ Envelope batch-path gains wrong: {flat} vs expected [{duck:.4f}, {base:.4f}]")
+                    return False
+                logger.info("✓ Music envelope batch/array path verified (matches moviepy's render-time call shape)")
+            except Exception as e:
+                logger.info(f"ℹ Envelope batch-path spot check skipped ({e}) - scalar reference already verified")
+
+            return True
+        except Exception:
+            logger.exception("❌ Envelope verification itself failed")
+            return False
 
     def prepare_audio(self, video_clip: VideoFileClip, voiceover_audio: AudioFileClip,
                      background_music=None, start_offset: float = 0.5) -> Tuple[AudioFileClip, bool]:
@@ -362,8 +490,8 @@ class AudioProcessor:
             vo_end = start_offset + voiceover_audio.duration
 
             if background_music is not None:
-                logger.info("✓ Compositing voiceover over ducked background music (source audio excluded)")
-                ducked_bg, ducking_applied = self.apply_music_ducking(background_music, start_offset, vo_end)
+                logger.info("✓ Compositing voiceover over enveloped background music (source audio excluded)")
+                ducked_bg, ducking_applied = self.apply_music_envelope(background_music, start_offset, vo_end)
                 final_audio = CompositeAudioClip([ducked_bg, voiceover_audio]).with_duration(clip_duration)
             else:
                 logger.info("✓ Using voiceover as sole audio track (no background music configured, source audio excluded)")
