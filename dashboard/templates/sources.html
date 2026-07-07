@@ -4,6 +4,28 @@
 <h1>Sources</h1>
 <p class="muted">Autonomous clip sourcing (agents/clip_sourcing.py) - finds and downloads its own footage from Reddit and YouTube on a schedule, so the input folder never needs a manual video drop.</p>
 
+<div class="card">
+  <h2>Setup Verification</h2>
+  <p class="muted">Live checks for the two things sourcing actually needs: Reddit API credentials, and a working yt-dlp (no API key required for YouTube sourcing/downloads - just a functional yt-dlp + network). Same checks as <code>python main.py --verify</code>, reachable without a terminal.</p>
+  <form method="post" action="{{ url_for('verify_sourcing_route') }}">
+    <button type="submit">Verify Sourcing Setup</button>
+  </form>
+  {% if verify_results is not none %}
+    <table style="margin-top:12px;">
+      <thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead>
+      <tbody>
+      {% for r in verify_results %}
+        <tr>
+          <td>{{ r.name }}</td>
+          <td>{% if r.passed %}<span class="badge badge-ok">PASS</span>{% else %}<span class="badge badge-err">FAIL</span>{% endif %}</td>
+          <td class="muted">{{ r.detail }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>
+
 <div class="grid grid-2">
   <div class="card">
     <h2>Reddit Subreddits</h2>
@@ -27,10 +49,18 @@
     <p class="muted">Recent uploads pulled for sourcing - config/source_channels.json</p>
     {% if source_config.channels %}
       <table>
-        <thead><tr><th>Channel</th></tr></thead>
+        <thead><tr><th>Channel</th><th></th></tr></thead>
         <tbody>
         {% for c in source_config.channels %}
-          <tr><td>{{ c }}</td></tr>
+          <tr>
+            <td>{{ c }}</td>
+            <td>
+              <form method="post" action="{{ url_for('remove_source_channel_route') }}" style="margin:0;">
+                <input type="hidden" name="channel_url" value="{{ c }}">
+                <button type="submit" class="secondary">Remove</button>
+              </form>
+            </td>
+          </tr>
         {% endfor %}
         </tbody>
       </table>
@@ -39,16 +69,45 @@
         <strong>Starts empty on purpose - this is not a bug.</strong>
         No YouTube channels are configured yet, so curated-channel sourcing
         contributes <strong>zero candidates every run</strong> until you add
-        at least one. Trending/search-query sourcing (fed from the daily
+        at least one below. Trending/search-query sourcing (fed from the daily
         Trend Intelligence brief) still runs independently and is
         <strong>not</strong> affected by this being empty.
-        <br><br>
-        Add channel URLs (e.g. <code>https://www.youtube.com/@SomeChannel</code>)
-        directly to <code>config/source_channels.json</code> to enable this
-        source.
       </div>
     {% endif %}
+    <form method="post" action="{{ url_for('add_source_channel_route') }}" style="margin-top:12px; display:flex; gap:8px;">
+      <input type="text" name="channel_url" placeholder="https://www.youtube.com/@SomeChannel" style="flex:1;">
+      <button type="submit">Add Channel</button>
+    </form>
   </div>
+</div>
+
+<div class="card">
+  <h2>Sourcing Run Schedule</h2>
+  <p class="muted">Times of day the clip sourcing job runs - config/source_schedule.json. Restart main.py after changing for it to take effect (jobs are registered once at startup).</p>
+  {% if source_config.run_times %}
+    <table>
+      <thead><tr><th>Run Time</th><th></th></tr></thead>
+      <tbody>
+      {% for t in source_config.run_times %}
+        <tr>
+          <td>{{ t }}</td>
+          <td>
+            <form method="post" action="{{ url_for('remove_sourcing_run_time_route') }}" style="margin:0;">
+              <input type="hidden" name="run_time" value="{{ t }}">
+              <button type="submit" class="secondary">Remove</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">No run times configured - sourcing will never fire on a schedule.</div>
+  {% endif %}
+  <form method="post" action="{{ url_for('add_sourcing_run_time_route') }}" style="margin-top:12px; display:flex; gap:8px;">
+    <input type="text" name="run_time" placeholder="HH:MM (e.g. 07:30)" style="flex:1;">
+    <button type="submit">Add Run Time</button>
+  </form>
 </div>
 
 <div class="card">

@@ -31,7 +31,7 @@
   <h2>⚠ Sourcing Alerts - Zero Clips Downloaded</h2>
   <p class="muted">A real sourcing run found nothing to download - this is the direct cause of an empty/stalled posting queue, not a silent no-op. See agents/clip_sourcing.py.</p>
   <table>
-    <thead><tr><th>When</th><th>Reason</th><th>Discovered</th><th>Rejected</th><th>Duplicates</th></tr></thead>
+    <thead><tr><th>When</th><th>Reason</th><th>Discovered</th><th>Rejected</th><th>Duplicates</th><th></th></tr></thead>
     <tbody>
     {% for a in sourcing_alerts %}
       <tr>
@@ -40,10 +40,16 @@
         <td class="muted">{{ a.candidates_discovered }}</td>
         <td class="muted">{{ a.rejected }}</td>
         <td class="muted">{{ a.duplicates_skipped }}</td>
+        <td>
+          <form method="post" action="{{ url_for('dismiss_sourcing_alert_route', alert_id=a.id) }}" style="margin:0;">
+            <button type="submit" class="secondary">Dismiss</button>
+          </form>
+        </td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  <p class="muted">Stays visible until dismissed - not cleared automatically by time or by a later successful sourcing run.</p>
 </div>
 {% endif %}
 

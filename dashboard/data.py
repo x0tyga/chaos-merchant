@@ -307,14 +307,15 @@ def add_competitor(handle_or_url: str, category: str = 'gaming') -> Optional[Dic
 
 def get_source_config() -> Dict:
     """
-    Reads the three sourcing config files for the dashboard Sources tab.
+    Reads the sourcing config files for the dashboard Sources tab.
     Defaults here match agents/clip_sourcing.py's own auto-create defaults
     exactly, so viewing this page before the sourcing agent has ever run
     (which is when these files get auto-created on disk) still shows the
     real starting state instead of an empty/misleading page.
     """
     from agents.clip_sourcing import (
-        SUBREDDITS_CONFIG_PATH, CHANNELS_CONFIG_PATH, BLOCKLIST_CONFIG_PATH, DEFAULT_SUBREDDITS
+        SUBREDDITS_CONFIG_PATH, CHANNELS_CONFIG_PATH, BLOCKLIST_CONFIG_PATH, DEFAULT_SUBREDDITS,
+        _load_sourcing_schedule
     )
     subreddits_cfg = _read_json(SUBREDDITS_CONFIG_PATH, {'subreddits': DEFAULT_SUBREDDITS})
     channels_cfg = _read_json(CHANNELS_CONFIG_PATH, {'channels': []})
@@ -323,7 +324,28 @@ def get_source_config() -> Dict:
         'subreddits': subreddits_cfg.get('subreddits', []),
         'channels': channels_cfg.get('channels', []),
         'blocked_uploaders': blocklist_cfg.get('blocked_uploaders', []),
+        'run_times': _load_sourcing_schedule(),
     }
+
+
+def add_source_channel(channel_url: str) -> bool:
+    from agents.clip_sourcing import add_source_channel as _add
+    return _add(channel_url)
+
+
+def remove_source_channel(channel_url: str) -> bool:
+    from agents.clip_sourcing import remove_source_channel as _remove
+    return _remove(channel_url)
+
+
+def add_sourcing_run_time(time_str: str) -> bool:
+    from agents.clip_sourcing import add_sourcing_run_time as _add
+    return _add(time_str)
+
+
+def remove_sourcing_run_time(time_str: str) -> bool:
+    from agents.clip_sourcing import remove_sourcing_run_time as _remove
+    return _remove(time_str)
 
 
 def get_sourcing_activity(limit: int = 30) -> List[Dict]:
@@ -334,6 +356,30 @@ def get_sourcing_activity(limit: int = 30) -> List[Dict]:
     except Exception as e:
         logger.warning(f"⚠ Could not read sourcing activity: {e}")
         return []
+
+
+def verify_sourcing_setup() -> List[Dict]:
+    """
+    Runs the two live checks core/setup_verification.py already defines
+    for sourcing specifically (Reddit credentials, yt-dlp functional) - a
+    dashboard-reachable equivalent of `python main.py --verify`, since not
+    every user running this from the web/desktop app has a terminal handy.
+    Never raises - a check that itself errors is reported as a failed
+    check, not a broken page.
+    """
+    from core.setup_verification import _check_reddit_credentials, _check_ytdlp_sourcing
+    checks = [
+        ('Reddit credentials', _check_reddit_credentials),
+        ('yt-dlp sourcing (live test search)', _check_ytdlp_sourcing),
+    ]
+    results = []
+    for name, check_fn in checks:
+        try:
+            passed, detail = check_fn()
+        except Exception as e:
+            passed, detail = False, f"check itself raised an unexpected error: {e}"
+        results.append({'name': name, 'passed': passed, 'detail': detail})
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -378,17 +424,46 @@ def get_auto_post_youtube_enabled() -> bool:
     return os.getenv('AUTO_POST_YOUTUBE', 'false').strip().lower() == 'true'
 
 
-def get_sourcing_alerts(limit: int = 10) -> List[Dict]:
+SOURCING_ALERTS_PATH = DATA_DIR / 'sourcing_alerts.json'
+
+
+def get_sourcing_alerts(limit: int = 10, include_dismissed: bool = False) -> List[Dict]:
     """
     Recent 'clip sourcing downloaded 0 new clips' alerts (agents/clip_sourcing.py's
     _log_and_notify_empty_run) - most recent first. This is the direct,
     diagnosable root cause behind an empty posting queue, surfaced on the
     Schedule tab rather than left to look like nothing is happening.
+
+    Dismissed by default (include_dismissed=False) - these stay visible
+    until a human explicitly dismisses them (dismiss_sourcing_alert below),
+    NOT auto-cleared by time or by a later successful sourcing run.
     """
-    alerts = _read_json(DATA_DIR / 'sourcing_alerts.json', [])
+    alerts = _read_json(SOURCING_ALERTS_PATH, [])
     if not isinstance(alerts, list):
         return []
+    if not include_dismissed:
+        alerts = [a for a in alerts if not a.get('dismissed')]
     return list(reversed(alerts))[:limit]
+
+
+def dismiss_sourcing_alert(alert_id: str) -> bool:
+    """Marks one sourcing alert dismissed by its id (timestamp). Returns False if not found."""
+    alerts = _read_json(SOURCING_ALERTS_PATH, [])
+    if not isinstance(alerts, list):
+        return False
+    found = False
+    for a in alerts:
+        if a.get('id') == alert_id:
+            a['dismissed'] = True
+            found = True
+    if found:
+        try:
+            with open(SOURCING_ALERTS_PATH, 'w') as f:
+                json.dump(alerts, f, indent=2)
+        except Exception as e:
+            logger.error(f"⚠ Could not write sourcing alerts after dismiss: {e}")
+            return False
+    return found
 
 
 # ---------------------------------------------------------------------------

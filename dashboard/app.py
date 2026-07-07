@@ -152,8 +152,60 @@ def sources_page():
     return render_template(
         'sources.html',
         source_config=data.get_source_config(),
-        activity=data.get_sourcing_activity(limit=30)
+        activity=data.get_sourcing_activity(limit=30),
+        verify_results=None
     )
+
+
+@app.route('/sources/verify', methods=['POST'])
+def verify_sourcing_route():
+    results = data.verify_sourcing_setup()
+    return render_template(
+        'sources.html',
+        source_config=data.get_source_config(),
+        activity=data.get_sourcing_activity(limit=30),
+        verify_results=results
+    )
+
+
+@app.route('/sources/channels/add', methods=['POST'])
+def add_source_channel_route():
+    url = request.form.get('channel_url', '').strip()
+    if url and data.add_source_channel(url):
+        flash(f"Added curated channel: {url}", 'success')
+    else:
+        flash('Enter a channel URL, or it is already on the list.', 'error')
+    return redirect(url_for('sources_page'))
+
+
+@app.route('/sources/channels/remove', methods=['POST'])
+def remove_source_channel_route():
+    url = request.form.get('channel_url', '').strip()
+    if data.remove_source_channel(url):
+        flash(f"Removed curated channel: {url}", 'success')
+    else:
+        flash('Channel not found.', 'error')
+    return redirect(url_for('sources_page'))
+
+
+@app.route('/sources/schedule/add', methods=['POST'])
+def add_sourcing_run_time_route():
+    time_str = request.form.get('run_time', '').strip()
+    if data.add_sourcing_run_time(time_str):
+        flash(f"Added sourcing run time: {time_str} (restart main.py to take effect)", 'success')
+    else:
+        flash('Enter a valid HH:MM time, or it is already scheduled.', 'error')
+    return redirect(url_for('sources_page'))
+
+
+@app.route('/sources/schedule/remove', methods=['POST'])
+def remove_sourcing_run_time_route():
+    time_str = request.form.get('run_time', '').strip()
+    if data.remove_sourcing_run_time(time_str):
+        flash(f"Removed sourcing run time: {time_str} (restart main.py to take effect)", 'success')
+    else:
+        flash('Run time not found.', 'error')
+    return redirect(url_for('sources_page'))
 
 
 @app.route('/schedule')
@@ -171,6 +223,15 @@ def schedule_page():
         auto_post_enabled=data.get_auto_post_youtube_enabled(),
         sourcing_alerts=data.get_sourcing_alerts(limit=10)
     )
+
+
+@app.route('/schedule/alerts/dismiss/<alert_id>', methods=['POST'])
+def dismiss_sourcing_alert_route(alert_id):
+    if data.dismiss_sourcing_alert(alert_id):
+        flash('Alert dismissed.', 'success')
+    else:
+        flash('Alert not found (already dismissed?).', 'error')
+    return redirect(url_for('schedule_page'))
 
 
 @app.route('/research')

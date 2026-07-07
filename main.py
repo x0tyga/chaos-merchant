@@ -171,28 +171,24 @@ def main():
         quota_priority=10
     )
 
-    # Register Clip Sourcing - twice daily (morning run right after Trend
-    # Intelligence, so it acts on same-day-fresh trends; evening run to
-    # catch same-day virality). Doesn't touch the YouTube Data API quota
-    # at all (yt-dlp scraping + PRAW, not the tracked API), so priority
-    # here only matters for jobs.mark_running()'s double-fire prevention,
-    # not quota gating. Actual daily volume is a soft target set in
-    # config/content_calendar.json (target_batches_per_day) - see
-    # agents/clip_sourcing.py's ClipSourcingAgent.SCHEDULED_RUNS_PER_DAY,
-    # which assumes exactly these two runs/day; update both together if
-    # this schedule ever changes.
-    scheduler.schedule_job(
-        'clip_sourcing_morning',
-        lambda: run_clip_sourcing(),
-        '07:30',
-        quota_priority=40
-    )
-    scheduler.schedule_job(
-        'clip_sourcing_evening',
-        lambda: run_clip_sourcing(),
-        '18:00',
-        quota_priority=40
-    )
+    # Register Clip Sourcing - run times come from config/source_schedule.json
+    # (default 07:30/18:00: morning run right after Trend Intelligence, so
+    # it acts on same-day-fresh trends; evening run to catch same-day
+    # virality) instead of hardcoded here, editable via the dashboard's
+    # Sources tab. agents/clip_sourcing.py's _apply_calendar_guidance()
+    # reads the SAME config file to derive runs-per-day, so the two can
+    # never drift out of sync the way two independently hardcoded numbers
+    # could. Doesn't touch the YouTube Data API quota at all (yt-dlp
+    # scraping + PRAW, not the tracked API), so priority here only matters
+    # for jobs.mark_running()'s double-fire prevention, not quota gating.
+    from agents.clip_sourcing import _load_sourcing_schedule
+    for run_time in _load_sourcing_schedule():
+        scheduler.schedule_job(
+            f'clip_sourcing_{run_time.replace(":", "")}',
+            lambda: run_clip_sourcing(),
+            run_time,
+            quota_priority=40
+        )
 
     # Register Competitor Monitor - every 3 hours, priority 50
     competitor_monitor = CompetitorMonitor(quota_tracker=scheduler.quota)

@@ -44,13 +44,27 @@ from core.notifications import send_notification
 SUBREDDITS_CONFIG_PATH = Path('./config/source_subreddits.json')
 CHANNELS_CONFIG_PATH = Path('./config/source_channels.json')
 BLOCKLIST_CONFIG_PATH = Path('./config/source_blocklist.json')
+SCHEDULE_CONFIG_PATH = Path('./config/source_schedule.json')
 
-# Rolling alert log the dashboard's Schedule tab reads (dashboard/data.py's
-# get_sourcing_alerts()) - a real run that downloads nothing is exactly the
-# silent failure mode that leaves the posting queue empty with no visible
-# cause, so it gets logged here AND desktop-notified, never just a log line.
-SOURCING_ALERTS_PATH = Path('./data/sourcing_alerts.json')
+DEFAULT_SOURCING_RUN_TIMES = ['07:30', '18:00']
+
 MAX_LOGGED_ALERTS = 200
+
+
+def _sourcing_alerts_path(data_dir: str = None) -> Path:
+    """
+    Rolling alert log the dashboard's Schedule tab reads (dashboard/data.py's
+    get_sourcing_alerts()) - a real run that downloads nothing is exactly
+    the silent failure mode that leaves the posting queue empty with no
+    visible cause, so it gets logged here AND desktop-notified, never just
+    a log line. Resolved from DATA_DIR (like every other data/ file in
+    this codebase - cost_log.json, notification_log.json, chaos_merchant.db)
+    rather than a hardcoded './data/...' constant, so a custom DATA_DIR
+    (see .env.example) is honored instead of silently writing to the
+    wrong place - the exact bug class caught in SourceRegistry() above via
+    tests/test_clip_sourcing_integration.py.
+    """
+    return Path(data_dir or os.getenv('DATA_DIR', './data')) / 'sourcing_alerts.json'
 
 DEFAULT_SUBREDDITS = ['GTA6', 'gaming', 'sports', 'PublicFreakout', 'nextfuckinglevel']
 
@@ -111,6 +125,136 @@ def _load_channels() -> List[str]:
     except Exception as e:
         logger.warning(f"⚠ Failed to load source channels config: {e}")
         return []
+
+
+def add_source_channel(channel_url: str) -> bool:
+    """
+    Appends a curated channel URL to config/source_channels.json - the
+    dashboard Sources tab's whitelist population UI, replacing "edit the
+    JSON file by hand" as the only way to fill in what starts empty on
+    purpose. Returns False (no-op, not an error) if the URL is already
+    present or blank.
+    """
+    channel_url = (channel_url or '').strip()
+    if not channel_url:
+        return False
+
+    channels = _load_channels()
+    if channel_url in channels:
+        logger.info(f"ℹ Channel already in source_channels.json: {channel_url}")
+        return False
+
+    channels.append(channel_url)
+    CHANNELS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    raw = {}
+    if CHANNELS_CONFIG_PATH.exists():
+        try:
+            with open(CHANNELS_CONFIG_PATH) as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+    raw['channels'] = channels
+    with open(CHANNELS_CONFIG_PATH, 'w') as f:
+        json.dump(raw, f, indent=2)
+    logger.info(f"✓ Added curated source channel: {channel_url}")
+    return True
+
+
+def remove_source_channel(channel_url: str) -> bool:
+    """Removes a channel URL from config/source_channels.json. Returns False (no-op) if it wasn't present."""
+    channels = _load_channels()
+    if channel_url not in channels:
+        return False
+
+    channels = [c for c in channels if c != channel_url]
+    raw = {}
+    if CHANNELS_CONFIG_PATH.exists():
+        try:
+            with open(CHANNELS_CONFIG_PATH) as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+    raw['channels'] = channels
+    with open(CHANNELS_CONFIG_PATH, 'w') as f:
+        json.dump(raw, f, indent=2)
+    logger.info(f"✓ Removed curated source channel: {channel_url}")
+    return True
+
+
+def _load_sourcing_schedule() -> List[str]:
+    """
+    'HH:MM' times the clip_sourcing job runs at, read by BOTH main.py (to
+    register the actual scheduled jobs) and ClipSourcingAgent itself (to
+    derive how many runs/day for content-calendar volume guidance) - a
+    single config file so the two can never drift out of sync the way a
+    hardcoded count in one place and a hardcoded schedule in another would.
+    """
+    if not SCHEDULE_CONFIG_PATH.exists():
+        SCHEDULE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        default = {
+            '_note': (
+                "What time(s) of day agents/clip_sourcing.py's scheduled job runs - "
+                "read by both main.py (registers one scheduled job per entry here) "
+                "and ClipSourcingAgent itself (derives runs-per-day for content "
+                "calendar volume guidance, so the two never drift apart). Edit "
+                "directly, or via the dashboard's Sources tab. Requires restarting "
+                "main.py to take effect (jobs are registered once at startup)."
+            ),
+            'run_times': DEFAULT_SOURCING_RUN_TIMES
+        }
+        with open(SCHEDULE_CONFIG_PATH, 'w') as f:
+            json.dump(default, f, indent=2)
+        logger.info(f"✓ Created default sourcing schedule config: {SCHEDULE_CONFIG_PATH}")
+        return list(DEFAULT_SOURCING_RUN_TIMES)
+    try:
+        with open(SCHEDULE_CONFIG_PATH) as f:
+            times = json.load(f).get('run_times', DEFAULT_SOURCING_RUN_TIMES)
+        return times or list(DEFAULT_SOURCING_RUN_TIMES)
+    except Exception as e:
+        logger.warning(f"⚠ Failed to load sourcing schedule config, using defaults: {e}")
+        return list(DEFAULT_SOURCING_RUN_TIMES)
+
+
+def add_sourcing_run_time(time_str: str) -> bool:
+    """Adds an 'HH:MM' run time to config/source_schedule.json. Returns False (no-op) if invalid, blank, or already present."""
+    time_str = (time_str or '').strip()
+    if not time_str or len(time_str) != 5 or time_str[2] != ':' or not (time_str[:2].isdigit() and time_str[3:].isdigit()):
+        logger.warning(f"⚠ Rejected invalid sourcing run time (expected HH:MM): {time_str!r}")
+        return False
+
+    times = _load_sourcing_schedule()
+    if time_str in times:
+        return False
+    times.append(time_str)
+    times.sort()
+    _write_sourcing_schedule(times)
+    logger.info(f"✓ Added sourcing run time: {time_str}")
+    return True
+
+
+def remove_sourcing_run_time(time_str: str) -> bool:
+    """Removes an 'HH:MM' run time from config/source_schedule.json. Returns False (no-op) if not present."""
+    times = _load_sourcing_schedule()
+    if time_str not in times:
+        return False
+    times = [t for t in times if t != time_str]
+    _write_sourcing_schedule(times)
+    logger.info(f"✓ Removed sourcing run time: {time_str}")
+    return True
+
+
+def _write_sourcing_schedule(times: List[str]) -> None:
+    SCHEDULE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    raw = {}
+    if SCHEDULE_CONFIG_PATH.exists():
+        try:
+            with open(SCHEDULE_CONFIG_PATH) as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+    raw['run_times'] = times
+    with open(SCHEDULE_CONFIG_PATH, 'w') as f:
+        json.dump(raw, f, indent=2)
 
 
 def _load_blocklist() -> List[str]:
@@ -426,16 +570,18 @@ class SourcingRateLimiter:
 class ClipSourcingAgent:
     """Main orchestrator: discover candidates -> dedup -> gate -> download into INPUT_DIR."""
 
-    # main.py registers exactly two scheduled clip_sourcing runs per day
-    # (07:30, 18:00) - used only to translate content_calendar.json's daily
-    # volume target into a soft per-run guidance number below. If main.py's
-    # schedule ever changes, update this to match.
-    SCHEDULED_RUNS_PER_DAY = 2
-
-    def __init__(self, input_dir: str = None):
+    def __init__(self, input_dir: str = None, data_dir: str = None):
         self.input_dir = Path(input_dir or os.getenv('INPUT_DIR', './input'))
         self.input_dir.mkdir(parents=True, exist_ok=True)
-        self.registry = SourceRegistry()
+        # Honors DATA_DIR the same way every other memory-backed class in
+        # this codebase does (ChannelMemory, HookLibrary, PostingQueue) -
+        # previously hardcoded to SourceRegistry()'s './data/...' default
+        # regardless of DATA_DIR, which on a deployment with a custom
+        # DATA_DIR (see .env.example) would silently dedup against the
+        # wrong database, defeating the "never download the same clip
+        # twice" guarantee. Found via tests/test_clip_sourcing_integration.py.
+        self.data_dir = data_dir or os.getenv('DATA_DIR', './data')
+        self.registry = SourceRegistry(str(Path(self.data_dir) / 'chaos_merchant.db'))
         self.gate = CopyrightRiskGate()
         self.limiter = SourcingRateLimiter()
         self._apply_calendar_guidance()
@@ -451,15 +597,21 @@ class ClipSourcingAgent:
         calendar target can never bypass the rate limiter, but a
         conservative calendar target can still pull the effective cap
         down below the rate limiter's default.
+
+        Runs-per-day is read from config/source_schedule.json (the same
+        file main.py reads to register the actual jobs), NOT a hardcoded
+        constant - so changing the sourcing schedule automatically keeps
+        this guidance in sync instead of silently drifting apart from it.
         """
         try:
             from core.content_calendar import load_content_calendar
+            scheduled_runs_per_day = max(1, len(_load_sourcing_schedule()))
             target_per_day = load_content_calendar().get('target_batches_per_day', 1)
-            calendar_derived_cap = max(1, -(-int(target_per_day) // self.SCHEDULED_RUNS_PER_DAY))  # ceil division
+            calendar_derived_cap = max(1, -(-int(target_per_day) // scheduled_runs_per_day))  # ceil division
             if calendar_derived_cap < self.limiter.max_downloads:
                 logger.info(
                     f"ℹ Content calendar target ({target_per_day} batches/day over "
-                    f"{self.SCHEDULED_RUNS_PER_DAY} scheduled runs) caps this run's "
+                    f"{scheduled_runs_per_day} scheduled runs) caps this run's "
                     f"downloads at {calendar_derived_cap} (below the "
                     f"SOURCING_MAX_DOWNLOADS_PER_RUN ceiling of {self.limiter.max_downloads})"
                 )
@@ -546,7 +698,7 @@ class ClipSourcingAgent:
                 )
                 try:
                     bytes_downloaded = file_path.stat().st_size
-                    log_download_usage(source_url, candidate['platform'], bytes_downloaded)
+                    log_download_usage(source_url, candidate['platform'], bytes_downloaded, data_dir=self.data_dir)
                 except Exception as e:
                     logger.debug(f"Download cost logging skipped (non-fatal): {e}")
                 downloaded.append({**candidate, 'file_path': str(file_path)})
@@ -609,28 +761,37 @@ class ClipSourcingAgent:
         message = f"Clip sourcing downloaded 0 new clips this run. {reason}"
         logger.warning(f"⚠ {message}")
 
+        alert_id = datetime.now().isoformat()  # unique per call (microsecond resolution) - doubles as the dismiss key
         alert = {
-            'timestamp': datetime.now().isoformat(),
+            'id': alert_id,
+            'timestamp': alert_id,
             'candidates_discovered': summary['candidates_discovered'],
             'duplicates_skipped': summary['duplicates_skipped'],
             'rejected': summary['rejected'],
             'reason': reason,
+            # Stays visible on the dashboard's Schedule tab until a human
+            # dismisses it (dashboard/data.py's dismiss_sourcing_alert) -
+            # NOT auto-cleared by time or by a later successful run, since
+            # a later run downloading clips doesn't retroactively mean this
+            # gap didn't happen.
+            'dismissed': False,
         }
+        alerts_path = _sourcing_alerts_path(self.data_dir)
         try:
-            SOURCING_ALERTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            alerts_path.parent.mkdir(parents=True, exist_ok=True)
             alerts = []
-            if SOURCING_ALERTS_PATH.exists():
+            if alerts_path.exists():
                 try:
-                    with open(SOURCING_ALERTS_PATH) as f:
+                    with open(alerts_path) as f:
                         alerts = json.load(f)
                 except Exception:
                     alerts = []
             alerts.append(alert)
             alerts = alerts[-MAX_LOGGED_ALERTS:]
-            with open(SOURCING_ALERTS_PATH, 'w') as f:
+            with open(alerts_path, 'w') as f:
                 json.dump(alerts, f, indent=2)
         except Exception as e:
-            logger.error(f"❌ Failed to log sourcing alert to {SOURCING_ALERTS_PATH}: {e}")
+            logger.error(f"❌ Failed to log sourcing alert to {alerts_path}: {e}")
 
         send_notification("⚠ Chaos Merchant: no new clips sourced", message)
 

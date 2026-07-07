@@ -172,6 +172,35 @@ def _check_youtube_api_key() -> Tuple[bool, str]:
     return True, f"set ({key[:6]}...)"
 
 
+def _check_ytdlp_sourcing() -> Tuple[bool, str]:
+    """
+    Verifies agents/clip_sourcing.py's YouTube path actually works.
+    Deliberately NOT a YOUTUBE_API_KEY check - yt-dlp based sourcing
+    (channel/search discovery + download) needs no API key at all, unlike
+    agents/analytics_feedback.py's/competitor_monitor.py's public Data API
+    calls. The real failure mode here is yt-dlp itself being missing,
+    outdated, or blocked (network/IP block, YouTube's page structure
+    changing under an old yt-dlp version) - so this attempts a real,
+    minimal, metadata-only extraction (skip_download=True, 1 result) the
+    same way _check_imagemagick() attempts a real render rather than just
+    checking installation.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        return False, "yt-dlp not installed (pip install yt-dlp) - YouTube sourcing and downloads will be skipped entirely"
+
+    try:
+        with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True, 'extract_flat': 'in_playlist'}) as ydl:
+            info = ydl.extract_info('ytsearch1:test', download=False)
+        entries = (info or {}).get('entries', []) or []
+        if not entries:
+            return False, "yt-dlp installed and ran, but the test search returned no results - check network connectivity"
+        return True, f"yt-dlp installed and working (live test search returned {len(entries)} result(s))"
+    except Exception as e:
+        return False, f"yt-dlp installed but the live test search failed: {e}"
+
+
 def _check_music_folder() -> Tuple[bool, str]:
     music_dir = Path(os.getenv('BACKGROUND_MUSIC_DIR', './assets/music'))
     supported_formats = ('.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac')
@@ -212,6 +241,7 @@ def run_verification() -> bool:
         ('ANTHROPIC_API_KEY set and valid', _check_anthropic_key),
         ('Reddit credentials set', _check_reddit_credentials),
         ('YOUTUBE_API_KEY set', _check_youtube_api_key),
+        ('yt-dlp sourcing functional (live test search)', _check_ytdlp_sourcing),
         ('assets/music/ has at least one track', _check_music_folder),
         ('CAPTION_FONT_PATH set and file exists', _check_caption_font),
     ]
