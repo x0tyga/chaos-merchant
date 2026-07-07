@@ -337,6 +337,48 @@ def get_sourcing_activity(limit: int = 30) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Schedule - autonomous posting queue, history, format distribution
+# ---------------------------------------------------------------------------
+
+def get_content_calendar() -> Dict:
+    from core.content_calendar import load_content_calendar
+    return load_content_calendar()
+
+
+def get_posting_queue(limit: int = 20) -> List[Dict]:
+    """Upcoming (not-yet-due) queued posts, soonest first."""
+    if not DB_PATH.exists():
+        return []
+    from core.memory import PostingQueue
+    return PostingQueue(str(DB_PATH)).get_upcoming(limit=limit)
+
+
+def get_next_scheduled_post() -> Optional[Dict]:
+    upcoming = get_posting_queue(limit=1)
+    return upcoming[0] if upcoming else None
+
+
+def get_posting_history(limit: int = 20) -> List[Dict]:
+    """Recently posted/skipped/failed queue items, most recent first."""
+    if not DB_PATH.exists():
+        return []
+    from core.memory import PostingQueue
+    return PostingQueue(str(DB_PATH)).get_recent_history(limit=limit)
+
+
+def get_format_distribution_7d() -> Dict[str, int]:
+    """Count of POSTED shorts per format_used over the last 7 days - the Schedule tab's chart."""
+    if not DB_PATH.exists():
+        return {}
+    from core.memory import PostingQueue
+    return PostingQueue(str(DB_PATH)).get_format_distribution(days=7)
+
+
+def get_auto_post_youtube_enabled() -> bool:
+    return os.getenv('AUTO_POST_YOUTUBE', 'false').strip().lower() == 'true'
+
+
+# ---------------------------------------------------------------------------
 # Research - thumbnail research, comment insights, content gaps
 # ---------------------------------------------------------------------------
 

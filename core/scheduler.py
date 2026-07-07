@@ -266,6 +266,30 @@ class ChaosScheduler:
 
         logger.info(f"✓ Job scheduled: {name} every {hours}h (priority: {quota_priority})")
 
+    def schedule_every_n_minutes(self, name: str, func: Callable, minutes: int, quota_priority: int = 100):
+        """Schedule job to run every N minutes - used by main.py to periodically drain the posting queue."""
+        def wrapped_job():
+            start = time.time()
+
+            if not self.jobs.mark_running(name):
+                logger.warning(f"⚠ Skipping {name} - job already running")
+                return
+
+            try:
+                logger.info(f"▶ Starting job: {name}")
+                func()
+                duration = time.time() - start
+                self.jobs.mark_complete(name, success=True, duration=duration)
+            except Exception as e:
+                duration = time.time() - start
+                logger.error(f"❌ Job failed: {name} - {e}")
+                self.jobs.mark_complete(name, success=False, duration=duration)
+
+        schedule.every(minutes).minutes.do(wrapped_job)
+        self.scheduled_jobs[name] = {'func': func, 'priority': quota_priority}
+
+        logger.info(f"✓ Job scheduled: {name} every {minutes}min (priority: {quota_priority})")
+
     def schedule_weekly(self, name: str, func: Callable, day: str, time: str, quota_priority: int = 100):
         """Schedule job to run weekly"""
         def wrapped_job():

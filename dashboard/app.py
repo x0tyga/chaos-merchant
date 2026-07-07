@@ -156,6 +156,22 @@ def sources_page():
     )
 
 
+@app.route('/schedule')
+def schedule_page():
+    format_dist = data.get_format_distribution_7d()
+    calendar = data.get_content_calendar()
+    return render_template(
+        'schedule.html',
+        calendar=calendar,
+        queue=data.get_posting_queue(limit=30),
+        next_post=data.get_next_scheduled_post(),
+        history=data.get_posting_history(limit=30),
+        format_distribution=format_dist,
+        format_distribution_total=sum(format_dist.values()),
+        auto_post_enabled=data.get_auto_post_youtube_enabled()
+    )
+
+
 @app.route('/research')
 def research_page():
     return render_template(

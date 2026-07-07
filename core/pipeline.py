@@ -22,6 +22,7 @@ class PipelineStep(Enum):
     QUALITY_CONTROL = 6
     OUTPUT_PACKAGING = 7
     PIPELINE_AUDIT = 8
+    AUTONOMOUS_PUBLISHING_ENQUEUE = 9
 
 
 class PipelineCheckpoint:
@@ -374,14 +375,16 @@ class Pipeline:
 
             from agents.script_voiceover import generate_voiceover_for_clip, get_clip_description
             from agents.format_selector import select_format_for_clip
-            from core.content_calendar import load_content_calendar
+            from core.content_calendar import get_effective_format_mix
 
             trending_topics = self._load_trending_topics()
             channel_history = self._load_channel_history()
-            # Soft format-mix guidance for this batch - see
-            # core/content_calendar.py: never overrides the Reaction gate
-            # or forces a format that doesn't fit a clip's actual content.
-            format_mix = load_content_calendar().get('format_mix')
+            # Soft format-mix guidance for this batch, auto-corrected over
+            # the last 7 days of actually-produced shorts (see
+            # core/content_calendar.py's get_effective_format_mix) - never
+            # overrides the Reaction gate or forces a format that doesn't
+            # fit a clip's actual content.
+            format_mix = get_effective_format_mix(str(self.data_dir))
 
             top_clip_indices = clip_manifest.get('top_clip_indices', [])
             clips = clip_manifest.get('clips', [])
@@ -768,6 +771,46 @@ class Pipeline:
             except Exception as e:
                 logger.exception("❌ Pipeline audit failed (non-fatal, batch was already produced successfully)")
                 self.log_step(PipelineStep.PIPELINE_AUDIT, 'failed', {'error': str(e)})
+
+            # Step 9: Autonomous Publishing Enqueue - schedules this batch's
+            # shorts for spaced-out, deduplicated YouTube posting
+            # (core/posting_queue.py). Does NOT post anything itself -
+            # core/posting_queue.py's drain_due_posts(), run on a schedule
+            # from main.py, is the only thing that actually uploads, and
+            # only when AUTO_POST_YOUTUBE=true. A failure here must never
+            # fail the overall pipeline run, same reasoning as the audit
+            # step above - the batch is already fully produced and
+            # packaged; a missed enqueue just means this batch waits for
+            # the next manual `python -m core.publisher publish` instead of
+            # being auto-scheduled.
+            logger.info("Step 9/9: Autonomous Publishing Enqueue")
+            self.log_step(PipelineStep.AUTONOMOUS_PUBLISHING_ENQUEUE, 'in_progress')
+            try:
+                batch_folder = packaging_result.get('batch_folder')
+                if batch_folder:
+                    from core.cost_tracker import get_cost_between
+                    from core.posting_queue import enqueue_batch_for_posting
+
+                    batch_cost_total = get_cost_between(
+                        self.processing_log.get('started_at'), datetime.now().isoformat(),
+                        data_dir=str(self.data_dir)
+                    )
+                    enqueue_result = enqueue_batch_for_posting(
+                        batch_folder=batch_folder,
+                        voiceover_results=self.step_outputs['script_voiceover'],
+                        production_result=production_result,
+                        video_path=str(self.video_path),
+                        batch_cost_total=batch_cost_total,
+                        data_dir=str(self.data_dir)
+                    )
+                    self.step_outputs['posting_queue'] = enqueue_result
+                    self.log_step(PipelineStep.AUTONOMOUS_PUBLISHING_ENQUEUE, 'complete', enqueue_result)
+                else:
+                    logger.warning("⚠ No batch_folder from packaging result, skipping posting queue enqueue")
+                    self.log_step(PipelineStep.AUTONOMOUS_PUBLISHING_ENQUEUE, 'skipped', {'reason': 'no batch_folder'})
+            except Exception as e:
+                logger.exception("❌ Posting queue enqueue failed (non-fatal, batch was already produced successfully)")
+                self.log_step(PipelineStep.AUTONOMOUS_PUBLISHING_ENQUEUE, 'failed', {'error': str(e)})
 
             # Pipeline complete
             logger.info("✅ Pipeline complete!")

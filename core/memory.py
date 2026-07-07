@@ -798,6 +798,33 @@ class ChannelMemory:
             logger.error(f"❌ Failed to generate format performance report: {e}")
             return {'by_format': {}, 'total_shorts': 0}
 
+    def get_format_counts(self, days: int = 7) -> Dict[str, int]:
+        """
+        Count of shorts PRODUCED (not necessarily posted) per format_used
+        in the last `days` days, keyed by production time (created_at) not
+        publish_date - so this reflects what the pipeline has actually been
+        outputting recently, which is what core/content_calendar.py's
+        get_effective_format_mix() needs to detect and correct skew.
+        Rows with no format_used recorded are excluded (not counted as
+        'unknown') since they'd otherwise be treated as a phantom format
+        with no target ratio to compare against.
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT format_used, COUNT(*)
+                FROM channel_shorts
+                WHERE format_used IS NOT NULL AND created_at > datetime('now', ?)
+                GROUP BY format_used
+            ''', (f'-{int(days)} days',))
+            rows = cursor.fetchall()
+            conn.close()
+            return {fmt: count for fmt, count in rows}
+        except Exception as e:
+            logger.error(f"❌ Failed to get format counts: {e}")
+            return {}
+
 
 class SourceRegistry:
     """
@@ -921,6 +948,266 @@ class SourceRegistry:
         except Exception as e:
             logger.error(f"❌ Failed to fetch recent sourced clips: {e}")
             return []
+
+    def get_by_file_path(self, file_path: str) -> Optional[Dict]:
+        """
+        Look up the source_url/platform a downloaded file came from, by the
+        exact file_path recorded at download time (agents/clip_sourcing.py's
+        record_downloaded()). Used by core/posting_queue.py to attribute a
+        produced batch's shorts back to the one sourced video they all came
+        from ("what source it came from" - the content calendar's posting
+        history requirement). Returns None for manually-dropped videos
+        (never went through the sourcing agent, so never registered here) -
+        that's a normal, expected case, not an error.
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT source_url, platform, title FROM sourced_clips WHERE file_path = ?
+                ORDER BY discovered_at DESC LIMIT 1
+            ''', (file_path,))
+            row = cursor.fetchone()
+            conn.close()
+            if not row:
+                return None
+            return {'source_url': row[0], 'platform': row[1], 'title': row[2]}
+        except Exception as e:
+            logger.error(f"❌ SourceRegistry file_path lookup failed: {e}")
+            return None
+
+
+class PostingQueue:
+    """
+    The queue autonomous publishing actually drains from - see
+    core/posting_queue.py for the orchestration (enqueue at packaging time,
+    drain on a schedule from main.py). Kept in the same chaos_merchant.db
+    as every other memory table, following this module's existing
+    convention (HookLibrary, ChannelMemory, SourceRegistry).
+
+    This is the layer that turns "batch passed QC" into "will post
+    eventually, at a sane spaced-out time, never twice" instead of
+    core/publisher.py's old behavior of firing every short in a batch to
+    YouTube immediately the moment it's called.
+    """
+
+    def __init__(self, db_path: str = './data/chaos_merchant.db'):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_database()
+        logger.info(f"✓ PostingQueue initialized: {self.db_path}")
+
+    def _init_database(self):
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS posting_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id TEXT NOT NULL,
+                    short_index INTEGER NOT NULL,
+                    video_path TEXT NOT NULL,
+                    thumbnail_path TEXT,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    hashtags TEXT,
+                    tags TEXT,
+                    format_used TEXT,
+                    source_url TEXT,
+                    source_platform TEXT,
+                    content_hash TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    scheduled_time TIMESTAMP NOT NULL,
+                    posted_at TIMESTAMP,
+                    youtube_id TEXT,
+                    youtube_url TEXT,
+                    failure_reason TEXT,
+                    estimated_cost_usd REAL DEFAULT 0.0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+            conn.close()
+            logger.info("✓ Posting queue database schema initialized")
+        except Exception as e:
+            logger.error(f"❌ PostingQueue database init failed: {e}")
+            raise
+
+    def content_hash_exists(self, content_hash: str) -> bool:
+        """
+        True if this exact video's content hash has EVER been queued -
+        regardless of current status (queued/posted/skipped/failed) - so a
+        clip re-processed from the same source (e.g. a registry race, or a
+        manually re-dropped file) can never be queued for posting twice.
+        This is the "never post the same Short twice even if it appears in
+        multiple batches" requirement's actual enforcement point.
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('SELECT 1 FROM posting_queue WHERE content_hash = ?', (content_hash,))
+            found = cursor.fetchone() is not None
+            conn.close()
+            return found
+        except Exception as e:
+            logger.error(f"❌ PostingQueue content_hash lookup failed: {e}")
+            # Fail open, same reasoning as SourceRegistry.is_known(): a
+            # missed duplicate wastes one upload, but failing closed on a
+            # transient DB error would silently stop ALL autonomous
+            # posting forever - the worse outcome for a zero-touch system.
+            return False
+
+    def enqueue(self, batch_id: str, short_index: int, video_path: str, title: str,
+                content_hash: str, scheduled_time: str, thumbnail_path: str = None,
+                description: str = '', hashtags: List[str] = None, tags: List[str] = None,
+                format_used: str = None, source_url: str = None, source_platform: str = None,
+                estimated_cost_usd: float = 0.0) -> Optional[int]:
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO posting_queue
+                (batch_id, short_index, video_path, thumbnail_path, title, description,
+                 hashtags, tags, format_used, source_url, source_platform, content_hash,
+                 status, scheduled_time, estimated_cost_usd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+            ''', (
+                batch_id, short_index, video_path, thumbnail_path, title, description,
+                json.dumps(hashtags or []), json.dumps(tags or []), format_used,
+                source_url, source_platform, content_hash, scheduled_time, estimated_cost_usd
+            ))
+            conn.commit()
+            row_id = cursor.lastrowid
+            conn.close()
+            logger.info(f"✓ Queued for posting [ID:{row_id}] {title[:50]!r} at {scheduled_time}")
+            return row_id
+        except Exception as e:
+            logger.error(f"❌ Failed to enqueue posting_queue row: {e}")
+            return None
+
+    def count_scheduled_on_date(self, date_str: str) -> int:
+        """Queued OR already-posted items whose scheduled_time falls on this date (YYYY-MM-DD) - used to respect posts_per_day."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT COUNT(*) FROM posting_queue
+                WHERE status IN ('queued', 'posted') AND date(scheduled_time) = ?
+            ''', (date_str,))
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count
+        except Exception as e:
+            logger.error(f"❌ Failed to count scheduled posts for {date_str}: {e}")
+            return 0
+
+    def get_due(self, now_iso: str = None) -> List[Dict]:
+        """Queued items whose scheduled_time has arrived, oldest first - what drain_due_posts() actually posts this run."""
+        now_iso = now_iso or datetime.now().isoformat()
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM posting_queue
+                WHERE status = 'queued' AND scheduled_time <= ?
+                ORDER BY scheduled_time ASC
+            ''', (now_iso,))
+            columns = [d[0] for d in cursor.description]
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            conn.close()
+            return rows
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch due posting_queue items: {e}")
+            return []
+
+    def get_upcoming(self, limit: int = 20) -> List[Dict]:
+        """Queued items not yet due - the dashboard's posting queue view."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM posting_queue WHERE status = 'queued'
+                ORDER BY scheduled_time ASC LIMIT ?
+            ''', (limit,))
+            columns = [d[0] for d in cursor.description]
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            conn.close()
+            return rows
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch upcoming posting_queue items: {e}")
+            return []
+
+    def get_recent_history(self, limit: int = 20) -> List[Dict]:
+        """Most recently posted/skipped/failed items - the dashboard's posting history view."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM posting_queue WHERE status != 'queued'
+                ORDER BY COALESCE(posted_at, created_at) DESC LIMIT ?
+            ''', (limit,))
+            columns = [d[0] for d in cursor.description]
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            conn.close()
+            return rows
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch posting history: {e}")
+            return []
+
+    def get_format_distribution(self, days: int = 7) -> Dict[str, int]:
+        """Count of POSTED shorts per format_used in the last N days - the Schedule tab's format-distribution chart."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT COALESCE(format_used, 'unknown'), COUNT(*) FROM posting_queue
+                WHERE status = 'posted' AND posted_at > datetime('now', ?)
+                GROUP BY COALESCE(format_used, 'unknown')
+            ''', (f'-{int(days)} days',))
+            rows = cursor.fetchall()
+            conn.close()
+            return {fmt: count for fmt, count in rows}
+        except Exception as e:
+            logger.error(f"❌ Failed to get posted format distribution: {e}")
+            return {}
+
+    def mark_posted(self, row_id: int, youtube_id: str, youtube_url: str) -> bool:
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE posting_queue SET status = 'posted', posted_at = ?, youtube_id = ?, youtube_url = ?
+                WHERE id = ?
+            ''', (datetime.now().isoformat(), youtube_id, youtube_url, row_id))
+            conn.commit()
+            conn.close()
+            logger.info(f"✓ Posting queue item [ID:{row_id}] marked posted: {youtube_url}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to mark posting_queue item posted: {e}")
+            return False
+
+    def mark_skipped_duplicate(self, row_id: int, reason: str) -> bool:
+        return self._mark_status(row_id, 'skipped_duplicate', reason)
+
+    def mark_failed(self, row_id: int, reason: str) -> bool:
+        return self._mark_status(row_id, 'failed', reason)
+
+    def _mark_status(self, row_id: int, status: str, reason: str) -> bool:
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE posting_queue SET status = ?, failure_reason = ? WHERE id = ?
+            ''', (status, reason, row_id))
+            conn.commit()
+            conn.close()
+            logger.info(f"✓ Posting queue item [ID:{row_id}] marked {status}: {reason}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to mark posting_queue item {status}: {e}")
+            return False
 
 
 def initialize_memory_system() -> Tuple[HookLibrary, ChannelMemory]:

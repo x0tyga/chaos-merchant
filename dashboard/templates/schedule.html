@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Schedule{% endblock %}
+{% block content %}
+<h1>Schedule</h1>
+<p class="muted">Content calendar, autonomous posting queue, and the AUTO_POST_YOUTUBE safety switch - core/content_calendar.py + core/posting_queue.py.</p>
+
+{% if auto_post_enabled %}
+<div class="toggle-banner on">
+  <strong>⚠ AUTO_POST_YOUTUBE = true — fully autonomous, zero-touch posting is LIVE.</strong>
+  <p class="muted" style="margin-top:6px;">
+    Every batch that passes QC is queued and posted automatically at its scheduled time below,
+    with no human review step. This runs forever until AUTO_POST_YOUTUBE is set back to
+    <code>false</code> in <a href="{{ url_for('settings_page') }}">Settings</a>.
+  </p>
+</div>
+{% else %}
+<div class="toggle-banner off">
+  <strong>AUTO_POST_YOUTUBE = false — autonomous posting is OFF (the default, safe state).</strong>
+  <p class="muted" style="margin-top:6px;">
+    Batches still get queued below at their computed scheduled times, but nothing is
+    actually uploaded to YouTube while this is off. This is not a review queue you approve
+    items out of - it is a single global switch. Flipping it to <code>true</code> in
+    <a href="{{ url_for('settings_page') }}">Settings</a> makes every currently-queued and
+    future item post automatically, with no further confirmation, forever.
+  </p>
+</div>
+{% endif %}
+
+<div class="grid grid-3">
+  <div class="stat">
+    <div class="label">Posts / Day Target</div>
+    <div class="value">{{ calendar.posts_per_day }}</div>
+  </div>
+  <div class="stat">
+    <div class="label">Next Scheduled Post</div>
+    <div class="value" style="font-size:14px;">
+      {% if next_post %}{{ next_post.scheduled_time }}{% else %}—{% endif %}
+    </div>
+  </div>
+  <div class="stat">
+    <div class="label">Queue Depth</div>
+    <div class="value">{{ queue|length }}</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Format Mix Target (config/content_calendar.json)</h2>
+  {% for fmt, share in calendar.format_mix.items() %}
+    <div class="bar-chart-row">
+      <div class="bar-chart-label">{{ fmt }}</div>
+      <div class="bar-chart-track"><div class="bar-chart-fill" style="width: {{ (share * 100)|round(1) }}%;"></div></div>
+      <div class="bar-chart-value">{{ (share * 100)|round(1) }}%</div>
+    </div>
+  {% endfor %}
+  <p class="muted">Soft guidance for agents/format_selector.py, auto-corrected over a rolling 7-day window by get_effective_format_mix() if actual output skews from this ratio.</p>
+</div>
+
+<div class="card">
+  <h2>Format Distribution - Last 7 Days (Posted)</h2>
+  {% if format_distribution %}
+    {% for fmt, count in format_distribution.items() %}
+      <div class="bar-chart-row">
+        <div class="bar-chart-label">{{ fmt }}</div>
+        <div class="bar-chart-track"><div class="bar-chart-fill" style="width: {{ ((count / format_distribution_total) * 100)|round(1) if format_distribution_total else 0 }}%;"></div></div>
+        <div class="bar-chart-value">{{ count }} short(s)</div>
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="empty-state">No shorts posted in the last 7 days yet.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Posting Queue</h2>
+  <p class="muted">Scheduled but not yet posted - see core/posting_queue.py.</p>
+  {% if queue %}
+    <table>
+      <thead><tr><th>Scheduled</th><th>Title</th><th>Format</th><th>Source</th><th>Batch</th></tr></thead>
+      <tbody>
+      {% for q in queue %}
+        <tr>
+          <td>{{ q.scheduled_time }}</td>
+          <td>{{ q.title[:60] }}</td>
+          <td class="muted">{{ q.format_used or '—' }}</td>
+          <td class="muted">{{ q.source_platform or 'manual' }}</td>
+          <td class="muted">{{ q.batch_id }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">Nothing queued yet - a batch is queued automatically once it passes QC.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Recent Posting History</h2>
+  {% if history %}
+    <table>
+      <thead><tr><th>Status</th><th>Title</th><th>When</th><th>YouTube</th><th>Est. Cost</th></tr></thead>
+      <tbody>
+      {% for h in history %}
+        <tr>
+          <td>
+            {% if h.status == 'posted' %}<span class="badge badge-ok">posted</span>
+            {% elif h.status == 'failed' %}<span class="badge badge-err">failed</span>
+            {% else %}<span class="badge badge-off">{{ h.status }}</span>{% endif %}
+          </td>
+          <td>{{ h.title[:60] }}</td>
+          <td class="muted">{{ h.posted_at or h.scheduled_time }}</td>
+          <td class="muted">{% if h.youtube_url %}<a href="{{ h.youtube_url }}" target="_blank">{{ h.youtube_url }}</a>{% else %}{{ h.failure_reason or '' }}{% endif %}</td>
+          <td class="muted">${{ '%.4f'|format(h.estimated_cost_usd or 0) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty-state">No posting history yet.</div>
+  {% endif %}
+</div>
+{% endblock %}

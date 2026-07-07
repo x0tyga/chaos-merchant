@@ -230,6 +230,21 @@ def main():
         quota_priority=70
     )
 
+    # Register Posting Queue Drain - periodically checks core/posting_queue.py
+    # for anything due to publish. AUTO_POST_YOUTUBE gates this at drain time
+    # (checked fresh every tick, not cached) - registering this job
+    # unconditionally is safe and correct even with the flag off: drain_due_posts()
+    # itself logs "disabled" and returns immediately when AUTO_POST_YOUTUBE
+    # is false, exactly like every other AUTO_POST_* check in this codebase.
+    from core.posting_queue import drain_due_posts
+    posting_drain_minutes = int(os.getenv('POSTING_QUEUE_DRAIN_MINUTES', '15'))
+    scheduler.schedule_every_n_minutes(
+        'posting_queue_drain',
+        lambda: drain_due_posts(),
+        posting_drain_minutes,
+        quota_priority=20
+    )
+
     # Start scheduler in background thread
     scheduler_thread = scheduler.run_in_thread()
 

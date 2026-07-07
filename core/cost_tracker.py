@@ -69,6 +69,43 @@ def log_anthropic_usage(agent: str, response, model: str = None, data_dir: str =
         logger.debug(f"Cost tracking skipped (non-fatal): {e}")
 
 
+def get_cost_between(start_iso: str, end_iso: str, data_dir: str = './data') -> float:
+    """
+    Sum of estimated_cost_usd for every logged call whose timestamp falls
+    within [start_iso, end_iso]. Used by core/posting_queue.py to attribute
+    a batch's real Anthropic API spend (script/SEO generation calls) across
+    the shorts it produced - the content calendar's "cost per Short
+    produced/posted" requirement. Returns 0.0 (never raises) if the log
+    doesn't exist or is unreadable, same graceful-degradation contract as
+    get_summary() below.
+    """
+    path = _log_path(data_dir)
+    if not path.exists():
+        return 0.0
+    try:
+        with open(path, 'r') as f:
+            entries = json.load(f)
+    except Exception as e:
+        logger.warning(f"⚠ Could not read cost log: {e}")
+        return 0.0
+
+    try:
+        start = datetime.fromisoformat(start_iso)
+        end = datetime.fromisoformat(end_iso)
+    except Exception:
+        return 0.0
+
+    total = 0.0
+    for e in entries:
+        try:
+            ts = datetime.fromisoformat(e['timestamp'])
+        except Exception:
+            continue
+        if start <= ts <= end:
+            total += e.get('estimated_cost_usd', 0.0)
+    return round(total, 6)
+
+
 def get_summary(data_dir: str = './data', days: int = 30) -> Dict:
     """
     Aggregate cost by agent and by day for the last `days` days. Returns a

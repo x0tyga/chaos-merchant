@@ -172,3 +172,13 @@ pre.log {
 
 .prompt-list a { display: block; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .muted { color: var(--text-dim); font-size: 12px; }
+
+.bar-chart-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.bar-chart-label { width: 110px; font-size: 12px; color: var(--text-dim); flex-shrink: 0; }
+.bar-chart-track { flex: 1; background: var(--panel-2); border-radius: 4px; height: 18px; overflow: hidden; }
+.bar-chart-fill { height: 100%; background: var(--accent-2); border-radius: 4px; }
+.bar-chart-value { width: 90px; text-align: right; font-size: 12px; color: var(--text-dim); flex-shrink: 0; }
+
+.toggle-banner { border-radius: 8px; padding: 16px; margin-bottom: 16px; border: 1px solid var(--border); }
+.toggle-banner.on { background: rgba(255, 92, 92, 0.12); border-color: var(--err); }
+.toggle-banner.off { background: rgba(151, 160, 175, 0.08); }
