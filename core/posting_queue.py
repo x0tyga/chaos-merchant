@@ -100,12 +100,22 @@ def enqueue_batch_for_posting(batch_folder: str, voiceover_results: List[Dict],
     packaged batch folder directly (same BATCH_MANIFEST.json /
     upload_metadata/*.json / shorts/*.mp4 shape core/publisher.py already
     consumes) and enqueues every Short that isn't a content-hash duplicate,
-    at spaced-out scheduled times. batch_cost_total (real Anthropic spend
-    for this pipeline run, from core.cost_tracker.get_cost_between()) is
-    divided evenly across the shorts actually enqueued, for the "cost per
-    Short" dashboard requirement - an approximation (per-call cost isn't
-    tagged per-short at the source), stated as such rather than presented
-    as exact.
+    at spaced-out scheduled times.
+
+    Cost-per-Short attribution combines TWO real cost sources, then divides
+    the total evenly across the shorts actually enqueued (an approximation
+    - neither is tagged per-short at the source - stated as such rather
+    than presented as exact):
+    - batch_cost_total: real Anthropic API spend during this pipeline run
+      (core.cost_tracker.get_cost_between()), passed in by the caller.
+    - download cost: the ONE source video this whole batch was extracted
+      from was downloaded once, well before this pipeline run started
+      (agents/clip_sourcing.py logs it at sourcing time, not at pipeline
+      time) - looked up here by source_url via
+      core.cost_tracker.get_cost_for_source_url() rather than a time
+      window, since a time window anchored to pipeline start would always
+      miss it. $0 by default (DOWNLOAD_COST_PER_GB_USD), nonzero only if
+      configured for a metered hosting environment.
     """
     batch_path = Path(batch_folder)
     manifest_path = batch_path / 'manifests' / 'BATCH_MANIFEST.json'
@@ -131,6 +141,10 @@ def enqueue_batch_for_posting(batch_folder: str, voiceover_results: List[Dict],
     posts_per_day = max(1, int(calendar.get('posts_per_day', 3)))
 
     source_info = source_registry.get_by_file_path(str(video_path)) or {}
+
+    from core.cost_tracker import get_cost_for_source_url
+    download_cost = get_cost_for_source_url(source_info.get('source_url'), data_dir=data_dir)
+    total_cost = batch_cost_total + download_cost
 
     metadata_dir = batch_path / 'upload_metadata'
     shorts_dir = batch_path / 'shorts'
@@ -184,7 +198,7 @@ def enqueue_batch_for_posting(batch_folder: str, voiceover_results: List[Dict],
         return {'status': 'no_op', 'enqueued': 0, 'skipped_duplicates': skipped_duplicates}
 
     slots = _next_available_slots(queue, optimizer, len(candidates), posts_per_day)
-    cost_per_short = round(batch_cost_total / len(candidates), 6) if candidates else 0.0
+    cost_per_short = round(total_cost / len(candidates), 6) if candidates else 0.0
 
     enqueued = []
     for item, scheduled_time in zip(candidates, slots):
@@ -210,8 +224,9 @@ def enqueue_batch_for_posting(batch_folder: str, voiceover_results: List[Dict],
 
     logger.info(
         f"✓ Queued {len(enqueued)} short(s) for autonomous posting from batch {batch_manifest.get('batch_id')} "
-        f"({skipped_duplicates} duplicate(s) skipped). Next scheduled: "
-        f"{enqueued[0]['scheduled_time'] if enqueued else 'n/a'}"
+        f"({skipped_duplicates} duplicate(s) skipped). Cost per short: ${cost_per_short:.6f} "
+        f"(API ${batch_cost_total:.6f} + download ${download_cost:.6f}, split across {len(candidates)}). "
+        f"Next scheduled: {enqueued[0]['scheduled_time'] if enqueued else 'n/a'}"
     )
     return {
         'status': 'success',

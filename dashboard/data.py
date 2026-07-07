@@ -378,6 +378,19 @@ def get_auto_post_youtube_enabled() -> bool:
     return os.getenv('AUTO_POST_YOUTUBE', 'false').strip().lower() == 'true'
 
 
+def get_sourcing_alerts(limit: int = 10) -> List[Dict]:
+    """
+    Recent 'clip sourcing downloaded 0 new clips' alerts (agents/clip_sourcing.py's
+    _log_and_notify_empty_run) - most recent first. This is the direct,
+    diagnosable root cause behind an empty posting queue, surfaced on the
+    Schedule tab rather than left to look like nothing is happening.
+    """
+    alerts = _read_json(DATA_DIR / 'sourcing_alerts.json', [])
+    if not isinstance(alerts, list):
+        return []
+    return list(reversed(alerts))[:limit]
+
+
 # ---------------------------------------------------------------------------
 # Research - thumbnail research, comment insights, content gaps
 # ---------------------------------------------------------------------------

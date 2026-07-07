@@ -36,12 +36,21 @@ except ImportError:
     logger.warning("yt-dlp not available - YouTube sourcing and all real downloads will be skipped (pip install yt-dlp)")
 
 from core.memory import SourceRegistry
+from core.cost_tracker import log_download_usage
+from core.notifications import send_notification
 
 # ---- Config files (auto-created with sane defaults on first run - same
 # pattern as config/competitors.json / config/gaming_calendar.json) ----
 SUBREDDITS_CONFIG_PATH = Path('./config/source_subreddits.json')
 CHANNELS_CONFIG_PATH = Path('./config/source_channels.json')
 BLOCKLIST_CONFIG_PATH = Path('./config/source_blocklist.json')
+
+# Rolling alert log the dashboard's Schedule tab reads (dashboard/data.py's
+# get_sourcing_alerts()) - a real run that downloads nothing is exactly the
+# silent failure mode that leaves the posting queue empty with no visible
+# cause, so it gets logged here AND desktop-notified, never just a log line.
+SOURCING_ALERTS_PATH = Path('./data/sourcing_alerts.json')
+MAX_LOGGED_ALERTS = 200
 
 DEFAULT_SUBREDDITS = ['GTA6', 'gaming', 'sports', 'PublicFreakout', 'nextfuckinglevel']
 
@@ -535,6 +544,11 @@ class ClipSourcingAgent:
                     candidate.get('popularity_signal', 0), (probe or {}).get('duration_seconds'),
                     title=candidate.get('title')
                 )
+                try:
+                    bytes_downloaded = file_path.stat().st_size
+                    log_download_usage(source_url, candidate['platform'], bytes_downloaded)
+                except Exception as e:
+                    logger.debug(f"Download cost logging skipped (non-fatal): {e}")
                 downloaded.append({**candidate, 'file_path': str(file_path)})
             else:
                 logger.error(f"❌ Download failed: {candidate.get('title', source_url)[:60]!r}")
@@ -558,7 +572,67 @@ class ClipSourcingAgent:
             f"{summary['duplicates_skipped']} duplicate(s) skipped, {summary['candidates_discovered']} discovered"
         )
         logger.info("=" * 70)
+
+        if not dry_run and summary['downloaded'] == 0:
+            self._log_and_notify_empty_run(summary, rejected)
+
         return summary
+
+    def _log_and_notify_empty_run(self, summary: Dict, rejected: List[Dict]):
+        """
+        A real (non-dry-run) sourcing run that downloads ZERO clips means
+        the input folder gets nothing new, which cascades all the way to
+        an empty posting queue with no shorts to publish - and with no
+        signal here, that would surface as silent nothing happening rather
+        than a diagnosable condition. Never skipped silently: always both
+        logged to SOURCING_ALERTS_PATH (dashboard's Schedule tab reads
+        this) AND desktop-notified.
+        """
+        if summary['candidates_discovered'] == 0:
+            reason = "no candidates discovered at all from Reddit or YouTube this run - check REDDIT_CLIENT_ID/SECRET, YOUTUBE curated channels/search queries, and network connectivity"
+        elif summary['duplicates_skipped'] == summary['candidates_discovered']:
+            reason = f"all {summary['candidates_discovered']} candidate(s) discovered were already-sourced duplicates - nothing new available from current sources right now"
+        elif summary['rejected'] > 0:
+            reason_counts = {}
+            for r in rejected:
+                key = r.get('rejection_reason', 'unknown')
+                reason_counts[key] = reason_counts.get(key, 0) + 1
+            top_reasons = sorted(reason_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]
+            reason = (
+                f"{summary['candidates_discovered']} candidate(s) discovered, all {summary['rejected']} rejected by "
+                f"the copyright/quality gate. Top reasons: " +
+                "; ".join(f"{count}x {msg}" for msg, count in top_reasons)
+            )
+        else:
+            reason = "no clips downloaded this run for an undetermined reason - check logs above"
+
+        message = f"Clip sourcing downloaded 0 new clips this run. {reason}"
+        logger.warning(f"⚠ {message}")
+
+        alert = {
+            'timestamp': datetime.now().isoformat(),
+            'candidates_discovered': summary['candidates_discovered'],
+            'duplicates_skipped': summary['duplicates_skipped'],
+            'rejected': summary['rejected'],
+            'reason': reason,
+        }
+        try:
+            SOURCING_ALERTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            alerts = []
+            if SOURCING_ALERTS_PATH.exists():
+                try:
+                    with open(SOURCING_ALERTS_PATH) as f:
+                        alerts = json.load(f)
+                except Exception:
+                    alerts = []
+            alerts.append(alert)
+            alerts = alerts[-MAX_LOGGED_ALERTS:]
+            with open(SOURCING_ALERTS_PATH, 'w') as f:
+                json.dump(alerts, f, indent=2)
+        except Exception as e:
+            logger.error(f"❌ Failed to log sourcing alert to {SOURCING_ALERTS_PATH}: {e}")
+
+        send_notification("⚠ Chaos Merchant: no new clips sourced", message)
 
     def _build_dest_path(self, candidate: Dict) -> Path:
         """

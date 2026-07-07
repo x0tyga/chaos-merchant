@@ -1,16 +1,31 @@
 """
-Cost Tracker - estimates Anthropic API spend from response.usage, fed by a
-single-line call at every agent's Claude call site. Powers the dashboard's
-cost widget. Purely additive telemetry: log_anthropic_usage() never raises,
-so a tracking failure can never break the agent that already got its real
-response back.
+Cost Tracker - estimates real spend across every cost-bearing call in the
+pipeline, fed by single-line calls at each call site. Powers the
+dashboard's cost widget and core/posting_queue.py's cost-per-Short
+attribution. Purely additive telemetry: neither logging function ever
+raises, so a tracking failure can never break the agent that already got
+its real result back.
+
+Two cost KINDS are logged to the same cost_log.json, distinguished by a
+'kind' field:
+- 'anthropic_api' (log_anthropic_usage): real, metered Claude API spend -
+  token-based, always nonzero for any real call.
+- 'download_bandwidth' (log_download_usage): agents/clip_sourcing.py's
+  yt-dlp downloads. yt-dlp itself has no metered API fee, but the bytes
+  transferred are a real resource cost IF this is running on infrastructure
+  that bills egress/bandwidth (a cloud VM) - it is NOT a real cost on the
+  documented home-machine deployment (CLAUDE.md's Canva MCP section),
+  which has no metered network. DOWNLOAD_COST_PER_GB_USD (.env, default
+  0.0) controls this - left at 0.0 for the honest default, set to a real
+  $/GB figure only if deployed somewhere that actually bills for it.
 """
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +45,25 @@ def _log_path(data_dir: str = './data') -> Path:
     return Path(data_dir) / 'cost_log.json'
 
 
+def _append_entry(entry: Dict, data_dir: str) -> None:
+    path = _log_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    entries = []
+    if path.exists():
+        try:
+            with open(path, 'r') as f:
+                entries = json.load(f)
+        except Exception:
+            entries = []
+
+    entries.append(entry)
+    entries = entries[-MAX_LOGGED_ENTRIES:]
+
+    with open(path, 'w') as f:
+        json.dump(entries, f, indent=2)
+
+
 def log_anthropic_usage(agent: str, response, model: str = None, data_dir: str = './data') -> None:
     """Record token usage + estimated cost from a Messages API response."""
     try:
@@ -42,31 +76,61 @@ def log_anthropic_usage(agent: str, response, model: str = None, data_dir: str =
         in_price, out_price = PRICING.get(resolved_model, DEFAULT_PRICING)
         cost = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
 
-        path = _log_path(data_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        entries = []
-        if path.exists():
-            try:
-                with open(path, 'r') as f:
-                    entries = json.load(f)
-            except Exception:
-                entries = []
-
-        entries.append({
+        _append_entry({
             'timestamp': datetime.now().isoformat(),
+            'kind': 'anthropic_api',
             'agent': agent,
             'model': resolved_model,
             'input_tokens': input_tokens,
             'output_tokens': output_tokens,
             'estimated_cost_usd': round(cost, 6)
-        })
-        entries = entries[-MAX_LOGGED_ENTRIES:]
-
-        with open(path, 'w') as f:
-            json.dump(entries, f, indent=2)
+        }, data_dir)
     except Exception as e:
         logger.debug(f"Cost tracking skipped (non-fatal): {e}")
+
+
+def log_download_usage(source_url: str, platform: str, bytes_downloaded: int, data_dir: str = './data') -> None:
+    """
+    Record a yt-dlp download's real bandwidth cost, tagged with the exact
+    source_url so core.posting_queue can later attribute it to whichever
+    batch that source video eventually produces (source downloads happen
+    at sourcing time, well before the pipeline run that turns them into
+    Shorts, so time-window correlation like get_cost_between() can't find
+    them - they must be looked up by source_url instead, via
+    get_cost_for_source_url()).
+    """
+    try:
+        rate_per_gb = float(os.getenv('DOWNLOAD_COST_PER_GB_USD', '0.0'))
+        gb = bytes_downloaded / (1024 ** 3)
+        cost = gb * rate_per_gb
+
+        _append_entry({
+            'timestamp': datetime.now().isoformat(),
+            'kind': 'download_bandwidth',
+            'agent': 'clip_sourcing',
+            'source_url': source_url,
+            'platform': platform,
+            'bytes_downloaded': bytes_downloaded,
+            'estimated_cost_usd': round(cost, 6)
+        }, data_dir)
+    except Exception as e:
+        logger.debug(f"Download cost tracking skipped (non-fatal): {e}")
+
+
+def get_cost_for_source_url(source_url: Optional[str], data_dir: str = './data') -> float:
+    """Sum of estimated_cost_usd for every logged entry tagged with this exact source_url (download cost lookup)."""
+    if not source_url:
+        return 0.0
+    path = _log_path(data_dir)
+    if not path.exists():
+        return 0.0
+    try:
+        with open(path, 'r') as f:
+            entries = json.load(f)
+    except Exception as e:
+        logger.warning(f"⚠ Could not read cost log: {e}")
+        return 0.0
+    return round(sum(e.get('estimated_cost_usd', 0.0) for e in entries if e.get('source_url') == source_url), 6)
 
 
 def get_cost_between(start_iso: str, end_iso: str, data_dir: str = './data') -> float:

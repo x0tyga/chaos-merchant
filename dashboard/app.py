@@ -168,7 +168,8 @@ def schedule_page():
         history=data.get_posting_history(limit=30),
         format_distribution=format_dist,
         format_distribution_total=sum(format_dist.values()),
-        auto_post_enabled=data.get_auto_post_youtube_enabled()
+        auto_post_enabled=data.get_auto_post_youtube_enabled(),
+        sourcing_alerts=data.get_sourcing_alerts(limit=10)
     )
 
 

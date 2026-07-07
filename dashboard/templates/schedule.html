@@ -26,6 +26,27 @@
 </div>
 {% endif %}
 
+{% if sourcing_alerts %}
+<div class="card">
+  <h2>⚠ Sourcing Alerts - Zero Clips Downloaded</h2>
+  <p class="muted">A real sourcing run found nothing to download - this is the direct cause of an empty/stalled posting queue, not a silent no-op. See agents/clip_sourcing.py.</p>
+  <table>
+    <thead><tr><th>When</th><th>Reason</th><th>Discovered</th><th>Rejected</th><th>Duplicates</th></tr></thead>
+    <tbody>
+    {% for a in sourcing_alerts %}
+      <tr>
+        <td class="muted">{{ a.timestamp }}</td>
+        <td><span class="badge badge-warn">empty run</span> {{ a.reason }}</td>
+        <td class="muted">{{ a.candidates_discovered }}</td>
+        <td class="muted">{{ a.rejected }}</td>
+        <td class="muted">{{ a.duplicates_skipped }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 <div class="grid grid-3">
   <div class="stat">
     <div class="label">Posts / Day Target</div>
