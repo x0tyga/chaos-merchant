@@ -750,6 +750,7 @@ class QualityController:
             'videos': [],
             'captions': [],
             'content_similarity': [],
+            'seo_duplicates': [],
             'metadata': [],
             'issues': {
                 'errors': [],
@@ -898,6 +899,39 @@ class QualityController:
         logger.info(f"✓ Content similarity check complete: {len(results['content_similarity'])} clips checked\n")
 
         # ============================================================
+        # VALIDATION 3B: SEO DUPLICATE CHECK (per-clip metadata uniqueness)
+        # ============================================================
+        # core/pipeline.py's Step 3 already tries to regenerate duplicate
+        # SEO metadata (agents/seo_optimizer.py's find_duplicate_seo())
+        # before this ever runs - this is the backstop for when that
+        # regeneration itself failed to produce distinct metadata. Those
+        # clips must not ship unnoticed with duplicate descriptions/
+        # hashtags just because regeneration was already attempted -
+        # flagged here as a QC warning so it's visible in the batch
+        # summary/dashboard instead of only in a log line from Step 3.
+        logger.info("🔁 VALIDATION 3B: SEO Duplicate Check (per-clip metadata uniqueness)")
+        logger.info("-" * 70)
+
+        unresolved_duplicates = (seo_manifest or {}).get('unresolved_seo_duplicates', [])
+        results['seo_duplicates'] = unresolved_duplicates
+
+        if unresolved_duplicates:
+            for dup in unresolved_duplicates:
+                clip_a, clip_b, field = dup.get('clip_a'), dup.get('clip_b'), dup.get('field')
+                warning_msg = (
+                    f"Short {clip_a + 1} and Short {clip_b + 1} have identical SEO {field} even "
+                    f"after regeneration was attempted - duplicate metadata shipped, needs manual review"
+                )
+                results['issues']['warnings'].append(warning_msg)
+                logger.warning(f"⚠ {warning_msg}")
+            if results['status'] != 'error':
+                results['status'] = 'warning'
+        else:
+            logger.info("  ✓ No unresolved SEO duplicates")
+
+        logger.info(f"✓ SEO duplicate check complete: {len(unresolved_duplicates)} unresolved duplicate(s)\n")
+
+        # ============================================================
         # VALIDATION 4: METADATA COMPLETENESS
         # ============================================================
         logger.info("📋 VALIDATION 4: Metadata Completeness")
@@ -939,6 +973,7 @@ class QualityController:
             'captions_passed': len([c for c in results['captions'] if c['details']['result'] == 'PASS']),
             'content_similarity_checked': len(results['content_similarity']),
             'content_unique': all(c['result'] != 'FAIL' for c in results['content_similarity']),
+            'seo_duplicates_unresolved': len(results.get('seo_duplicates', [])),
             'total_errors': len(results['issues']['errors']),
             'total_warnings': len(results['issues']['warnings']),
             'overall_status': results['status']

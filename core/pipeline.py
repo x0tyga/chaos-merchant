@@ -522,13 +522,20 @@ class Pipeline:
                     except Exception as e:
                         logger.error(f"❌ SEO regeneration failed for clip {j + 1}: {e}")
                         seo_results[j] = {'status': 'error', 'clip_index': j, 'error': str(e)}
-            else:
-                remaining = find_duplicate_seo(seo_results)
-                if remaining:
-                    logger.warning(
-                        f"⚠ SEO duplicates still present after {MAX_SEO_REGEN_ATTEMPTS} regeneration "
-                        f"attempt(s) - proceeding anyway: {remaining}"
-                    )
+
+            # Computed unconditionally (not just when the regen loop ran out
+            # of attempts) so QC always gets an accurate answer, including
+            # the "no duplicates at all" case. Duplicates that survive every
+            # regeneration attempt are NOT silently shipped - they're
+            # attached to the SEO manifest so quality_control.py can flag
+            # the affected clips as a warning instead of passing through
+            # unnoticed with duplicate metadata.
+            unresolved_seo_duplicates = find_duplicate_seo(seo_results)
+            if unresolved_seo_duplicates:
+                logger.warning(
+                    f"⚠ SEO duplicates still present after {MAX_SEO_REGEN_ATTEMPTS} regeneration "
+                    f"attempt(s) - flagging in QC rather than shipping silently: {unresolved_seo_duplicates}"
+                )
 
             # Backward-compatible top-level shape (best_title/metadata),
             # taken from the first successful clip, for consumers that
@@ -541,6 +548,16 @@ class Pipeline:
                 'best_title': first_success.get('best_title', ''),
                 'metadata': first_success.get('metadata', {}),
                 'per_clip': seo_results,
+                # Clips whose SEO metadata is STILL duplicated after every
+                # regeneration attempt - quality_control.py reads this to
+                # flag the affected shorts as a warning rather than let
+                # duplicate metadata ship unnoticed. Empty list means
+                # every clip's metadata is confirmed unique (not just
+                # "never checked").
+                'unresolved_seo_duplicates': [
+                    {'clip_a': i, 'clip_b': j, 'field': field}
+                    for i, j, field in unresolved_seo_duplicates
+                ],
                 'timestamp': datetime.now().isoformat()
             }
             self.step_outputs['seo_optimizer'] = seo_result

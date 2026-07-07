@@ -33,12 +33,20 @@ def _check_ffmpeg() -> Tuple[bool, str]:
 def _check_imagemagick() -> Tuple[bool, str]:
     """
     Checks both that ImageMagick is installed AND that its policy actually
-    allows text/label rendering - the real-world way this gotcha bites is
+    allows text rendering - the real-world way this gotcha bites is
     ImageMagick being present but its policy.xml silently blocking the
-    exact operation being used, which "is it installed" alone can't catch.
-    Renders a real tiny label image rather than parsing policy.xml, since
-    that's the one test that reflects what will actually happen at render
-    time regardless of ImageMagick version or policy file location.
+    exact "label"/"text" operation being used, which "is it installed"
+    alone can't catch. Attempts a real render of a single test character
+    rather than parsing policy.xml (which varies in format/location across
+    versions and distros), since that's the one test that reflects what
+    will actually happen at render time regardless of any of that.
+
+    Deliberately doesn't trust the subprocess's exit code alone - a policy
+    could in principle let the process exit 0 while still producing an
+    empty/corrupt file (the same "verify the actual artifact, don't trust
+    the return code" reasoning this codebase already applies to
+    VideoExporter.export_mp4()). The output file is opened and its real
+    byte size checked, not just its existence.
 
     NOTE: as of this session's Bug 3 fix, moviepy 2.x's TextClip no longer
     uses ImageMagick at all for captions (it renders via Pillow directly,
@@ -55,16 +63,36 @@ def _check_imagemagick() -> Tuple[bool, str]:
         )
 
     test_path = Path(tempfile.gettempdir()) / '_chaos_merchant_im_verify.png'
+    test_path.unlink(missing_ok=True)  # remove any stale file from a previous run first
     try:
+        # A single test character, not a whole word - the minimal possible
+        # exercise of the "label:" text-rendering coder ImageMagick's
+        # policy.xml can block.
         result = subprocess.run(
-            [binary, '-size', '100x30', 'label:test', str(test_path)],
+            [binary, '-size', '40x40', 'label:A', str(test_path)],
             capture_output=True, timeout=10, text=True
         )
+
         if result.returncode != 0:
-            return False, f"installed at {binary} but policy likely blocks text/label operations: {result.stderr.strip()[:200]}"
-        return True, f"found at {binary}, text/label rendering verified working"
+            stderr = result.stderr.strip()
+            if 'not authorized' in stderr.lower() or 'policy' in stderr.lower():
+                return False, f"installed at {binary} but policy.xml blocks text/label rendering: {stderr[:200]}"
+            return False, f"installed at {binary} but the test render failed (exit {result.returncode}): {stderr[:200]}"
+
+        # Exit 0 alone isn't proof the character actually got rendered -
+        # some policy configurations can produce a valid-but-empty file
+        # rather than a nonzero exit. A real rendered PNG of a label is at
+        # minimum tens of bytes; a handful of bytes or a missing file means
+        # nothing was actually drawn.
+        if not test_path.exists():
+            return False, f"installed at {binary}, exited successfully, but produced no output file - policy may be silently blocking the render"
+        size = test_path.stat().st_size
+        if size < 50:
+            return False, f"installed at {binary}, exited successfully, but the output file is only {size} bytes - too small to be a real rendered character"
+
+        return True, f"found at {binary}, text rendering verified working ({size} byte test image produced)"
     except Exception as e:
-        return False, f"found at {binary} but a test render failed: {e}"
+        return False, f"found at {binary} but the test render raised an exception: {e}"
     finally:
         try:
             test_path.unlink(missing_ok=True)
