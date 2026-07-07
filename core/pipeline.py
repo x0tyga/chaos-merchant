@@ -409,14 +409,21 @@ class Pipeline:
                     # (the selector judges partly on what's actually on
                     # screen) - computed once here and passed through so
                     # generate_voiceover_for_clip() doesn't re-run the same
-                    # vision call a second time.
-                    clip_description = get_clip_description(clip_data, i, str(self.video_path))
+                    # vision call a second time. confidence is the model's
+                    # own self-report of how reliable this description is -
+                    # the format selector uses it to fall back to a safe
+                    # default rather than trust a vague/wrong description.
+                    clip_description, clip_description_confidence = get_clip_description(clip_data, i, str(self.video_path))
 
                     format_type, format_rationale = select_format_for_clip(
-                        clip_data, clip_description=clip_description, trending_topics=trending_topics,
-                        format_mix=format_mix
+                        clip_data, clip_description=clip_description,
+                        clip_description_confidence=clip_description_confidence,
+                        trending_topics=trending_topics, format_mix=format_mix
                     )
-                    logger.info(f"✓ Clip {i + 1}/{len(top_clip_indices)}: format '{format_type}' ({format_rationale})")
+                    logger.info(
+                        f"✓ Clip {i + 1}/{len(top_clip_indices)}: format '{format_type}' ({format_rationale}) "
+                        f"[description confidence: {clip_description_confidence:.2f}]"
+                    )
 
                     other_clips_context = None
                     if format_type in ('ranking', 'comparison'):
@@ -432,9 +439,17 @@ class Pipeline:
                         # from engagement scores.
                         source_video_path=str(self.video_path),
                         clip_description=clip_description,
+                        clip_description_confidence=clip_description_confidence,
                         format_type=format_type,
                         other_clips_context=other_clips_context
                     )
+                    # Attached here rather than inside generate_voiceover_for_clip()
+                    # since the rationale is a product of THIS loop's format
+                    # selection step, not of voiceover generation itself -
+                    # recorded in voiceover_metadata.json alongside
+                    # clip_description/clip_description_confidence so it's
+                    # visible exactly why each format was picked during testing.
+                    vr['format_rationale'] = format_rationale
                     voiceover_results.append(vr)
                 except Exception as e:
                     logger.error(f"❌ Voiceover generation failed for clip {i + 1}/{len(top_clip_indices)}: {e}")
@@ -465,7 +480,7 @@ class Pipeline:
             logger.info("Step 3/7: SEO Optimization (per-clip)")
             self.log_step(PipelineStep.SEO_OPTIMIZER, 'in_progress')
 
-            from agents.seo_optimizer import optimize_seo
+            from agents.seo_optimizer import optimize_seo, find_duplicate_seo
 
             seo_results = []
             for i, clip_idx in enumerate(top_clip_indices):
@@ -477,6 +492,43 @@ class Pipeline:
                 except Exception as e:
                     logger.error(f"❌ SEO optimization failed for clip {i + 1}/{len(top_clip_indices)}: {e}")
                     seo_results.append({'status': 'error', 'clip_index': i, 'error': str(e)})
+
+            # Per-clip SEO only means anything if each clip's metadata is
+            # genuinely distinct - an identical description/hashtag set
+            # across two different clips means the model ignored per-clip
+            # context, a real bug this was never actually checked for
+            # before. Regenerate the SECOND clip in each colliding pair
+            # (keep the first occurrence as-is) and re-check, capped at a
+            # few attempts so a model that keeps producing the same output
+            # can't loop forever.
+            MAX_SEO_REGEN_ATTEMPTS = 2
+            for attempt in range(1, MAX_SEO_REGEN_ATTEMPTS + 1):
+                dup_pairs = find_duplicate_seo(seo_results)
+                if not dup_pairs:
+                    break
+
+                for i, j, field in dup_pairs:
+                    logger.warning(
+                        f"⚠ SEO duplicate detected: clip {i + 1} and clip {j + 1} have identical "
+                        f"{field} - forcing regeneration of clip {j + 1} (attempt {attempt}/{MAX_SEO_REGEN_ATTEMPTS})"
+                    )
+
+                for j in sorted({pair[1] for pair in dup_pairs}):
+                    clip_idx_j = top_clip_indices[j]
+                    clip_data_j = clips[clip_idx_j] if clip_idx_j < len(clips) else {}
+                    clip_voiceover_j = voiceover_results[j] if j < len(voiceover_results) else {}
+                    try:
+                        seo_results[j] = optimize_seo(clip_data_j, clip_voiceover_j, trending_topics=trending_topics)
+                    except Exception as e:
+                        logger.error(f"❌ SEO regeneration failed for clip {j + 1}: {e}")
+                        seo_results[j] = {'status': 'error', 'clip_index': j, 'error': str(e)}
+            else:
+                remaining = find_duplicate_seo(seo_results)
+                if remaining:
+                    logger.warning(
+                        f"⚠ SEO duplicates still present after {MAX_SEO_REGEN_ATTEMPTS} regeneration "
+                        f"attempt(s) - proceeding anyway: {remaining}"
+                    )
 
             # Backward-compatible top-level shape (best_title/metadata),
             # taken from the first successful clip, for consumers that

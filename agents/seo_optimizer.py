@@ -7,6 +7,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Tuple
 from anthropic import Anthropic
 
 from core.cost_tracker import log_anthropic_usage
@@ -187,6 +188,48 @@ Output ONLY valid JSON."""
             return optimal_titles[0]
         
         return titles[0]
+
+
+def find_duplicate_seo(seo_results: List[Dict]) -> List[Tuple[int, int, str]]:
+    """
+    Pairwise-compares successful SEO results within a batch for exact
+    duplicate descriptions or hashtag sets. Per-clip SEO only means
+    anything if each clip's metadata is genuinely distinct - two different
+    clips in the same batch ending up with an identical description or
+    identical hashtag set means the model effectively ignored per-clip
+    context, which is a real generation bug, not a stylistic quirk to
+    shrug off.
+
+    Only compares clips with status == 'success' (a failed/error result
+    has no metadata to compare and isn't a "duplicate" in any meaningful
+    sense). Hashtag comparison is order-independent (a set, not a list) -
+    the same 12 hashtags in a different order is still a duplicate.
+
+    Returns a list of (i, j, field) tuples for every colliding pair
+    (i < j, both indices into seo_results), where field is 'description'
+    or 'hashtags'. Empty list means no duplicates found.
+    """
+    pairs = []
+    successful = [i for i, r in enumerate(seo_results) if r.get('status') == 'success']
+
+    for a in range(len(successful)):
+        i = successful[a]
+        meta_i = seo_results[i].get('metadata', {})
+        desc_i = (meta_i.get('description') or '').strip()
+        hashtags_i = frozenset(meta_i.get('hashtags', []) or [])
+
+        for b in range(a + 1, len(successful)):
+            j = successful[b]
+            meta_j = seo_results[j].get('metadata', {})
+            desc_j = (meta_j.get('description') or '').strip()
+            hashtags_j = frozenset(meta_j.get('hashtags', []) or [])
+
+            if desc_i and desc_i == desc_j:
+                pairs.append((i, j, 'description'))
+            elif hashtags_i and hashtags_i == hashtags_j:
+                pairs.append((i, j, 'hashtags'))
+
+    return pairs
 
 
 def optimize_seo(clip_data, script_data, trending_topics=None):

@@ -16,6 +16,15 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# --verify runs setup verification (core/setup_verification.py) and exits
+# WITHOUT importing the full agent stack below - checked here, before
+# those imports, so a genuinely broken/missing dependency in one of those
+# modules can't crash the verification command itself, which is exactly
+# the failure mode --verify exists to diagnose.
+if '--verify' in sys.argv:
+    from core.setup_verification import run_verification
+    sys.exit(0 if run_verification() else 1)
+
 # Configure logging - stdout (as before) plus a rotating file under
 # LOG_DIR so the dashboard's Logs page has something real to tail. 10MB x 5
 # backups is generous for text logs and self-limiting so it can never fill

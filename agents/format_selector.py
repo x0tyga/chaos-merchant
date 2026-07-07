@@ -39,6 +39,18 @@ DEFAULT_REACTION_MIN_VIRAL_SCORE = 8.0
 # reason - a failed selector call is not "genuinely remarkable").
 FALLBACK_FORMAT = 'hidden_details'
 
+# The format selector's quality depends entirely on the accuracy of the
+# clip content description (agents/script_voiceover.py's
+# ClipContentAnalyzer) - a vague or wrong description makes every format
+# decision downstream wrong regardless of how good the selection logic
+# itself is. Below this self-reported confidence (0.0-1.0, from the
+# model's own rating of how clearly it could make out what's happening),
+# skip the LLM tiebreak entirely rather than let it reason from an
+# unreliable description - FALLBACK_FORMAT is always safe since it works
+# from whatever metadata is available without needing to be confident
+# about specific on-screen content.
+DEFAULT_MIN_DESCRIPTION_CONFIDENCE = 0.5
+
 
 class FormatSelector:
     """Hybrid format selector: deterministic Reaction gate + LLM tiebreak among the rest."""
@@ -56,6 +68,18 @@ class FormatSelector:
             )
             self.reaction_min_viral_score = DEFAULT_REACTION_MIN_VIRAL_SCORE
 
+        try:
+            self.min_description_confidence = float(
+                os.getenv('FORMAT_SELECTOR_MIN_DESCRIPTION_CONFIDENCE', DEFAULT_MIN_DESCRIPTION_CONFIDENCE)
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                f"⚠ Invalid FORMAT_SELECTOR_MIN_DESCRIPTION_CONFIDENCE value "
+                f"{os.getenv('FORMAT_SELECTOR_MIN_DESCRIPTION_CONFIDENCE')!r} - using default "
+                f"{DEFAULT_MIN_DESCRIPTION_CONFIDENCE}"
+            )
+            self.min_description_confidence = DEFAULT_MIN_DESCRIPTION_CONFIDENCE
+
     def _eligible_formats(self, clip_data: Dict) -> List[str]:
         """Deterministic step: every format is eligible except Reaction, which requires
         clearing the viral_score gate - the only hardcoded rule for launch."""
@@ -71,6 +95,7 @@ class FormatSelector:
         return eligible
 
     def select_format(self, clip_data: Dict, clip_description: Optional[str] = None,
+                      clip_description_confidence: Optional[float] = None,
                       trending_topics: Optional[List] = None,
                       format_mix: Optional[Dict[str, float]] = None) -> Tuple[str, str]:
         """
@@ -82,6 +107,12 @@ class FormatSelector:
             clip_description: Factual content description from
                 ClipContentAnalyzer, if available (same ground truth the
                 script generator itself uses).
+            clip_description_confidence: The model's own 0.0-1.0 confidence
+                in clip_description (from get_clip_description()). None
+                means "no description was attempted at all" (handled the
+                same as before - the LLM judges from metadata only), which
+                is deliberately distinct from "a description was attempted
+                but rated low-confidence" (handled below).
             trending_topics: Trending topics for context.
             format_mix: Optional {format: target_share} guidance (e.g. from
                 a future content calendar) - passed to the model as soft
@@ -93,6 +124,14 @@ class FormatSelector:
             VALID_FORMATS (never invented), rationale is a short
             human-readable explanation for logging/debugging.
         """
+        if clip_description_confidence is not None and clip_description_confidence < self.min_description_confidence:
+            logger.info(
+                f"ℹ Clip content description confidence ({clip_description_confidence:.2f}) is below "
+                f"threshold ({self.min_description_confidence}) - defaulting to '{FALLBACK_FORMAT}' "
+                f"instead of risking a format decision based on an unreliable description"
+            )
+            return FALLBACK_FORMAT, f"description confidence {clip_description_confidence:.2f} below threshold {self.min_description_confidence}"
+
         eligible = self._eligible_formats(clip_data)
 
         if len(eligible) == 1:
@@ -179,11 +218,14 @@ Output ONLY a JSON object: {{"format": "<one of the candidate format keys above>
 
 
 def select_format_for_clip(clip_data: Dict, clip_description: Optional[str] = None,
+                           clip_description_confidence: Optional[float] = None,
                            trending_topics: Optional[List] = None,
                            format_mix: Optional[Dict[str, float]] = None) -> Tuple[str, str]:
     """Module-level entry point, matching the other agents' function-per-concern convention
     (optimize_seo(), generate_voiceover_for_clip(), etc.)."""
     selector = FormatSelector()
-    format_type, rationale = selector.select_format(clip_data, clip_description, trending_topics, format_mix)
+    format_type, rationale = selector.select_format(
+        clip_data, clip_description, clip_description_confidence, trending_topics, format_mix
+    )
     logger.info(f"✓ Format selected: {format_type} ({rationale})")
     return format_type, rationale

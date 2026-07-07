@@ -265,11 +265,20 @@ class ClipContentAnalyzer:
     def __init__(self):
         self.client = Anthropic()
 
-    def describe_clip(self, source_video_path: str, start_time: float, end_time: float) -> Optional[str]:
-        """Returns a factual description of the clip's content, or None if analysis isn't possible."""
+    def describe_clip(self, source_video_path: str, start_time: float, end_time: float) -> Tuple[Optional[str], float]:
+        """
+        Returns (description, confidence) - confidence is a 0.0-1.0
+        self-report from the model itself, reflecting how clearly it could
+        actually make out what's happening (dark/blurry/ambiguous frames
+        should self-report low). Downstream format selection depends
+        entirely on this description being accurate - a vague or wrong
+        description silently produces a wrong format call otherwise - so
+        this is asked for explicitly rather than inferred after the fact.
+        Returns (None, 0.0) if analysis isn't possible at all (no frames).
+        """
         frames = self._extract_frames(source_video_path, start_time, end_time)
         if not frames:
-            return None
+            return None, 0.0
 
         duration = end_time - start_time
         content = []
@@ -287,23 +296,66 @@ class ClipContentAnalyzer:
                 f"visible game UI or mechanics, and what changes across the frames. "
                 f"Name specific identifiable things (the game, characters, vehicles, "
                 f"locations) when you are confident. 2-4 sentences of plain factual "
-                f"observation - no hype, no speculation beyond what is visible."
+                f"observation - no hype, no speculation beyond what is visible.\n\n"
+                f"Then rate your own confidence in this description on a 0.0-1.0 scale - "
+                f"low (0.0-0.4) if frames are dark, blurry, too zoomed, or ambiguous "
+                f"about what's actually happening; high (0.7-1.0) only if you can clearly "
+                f"identify the specific content. Be honest - a low-confidence rating here "
+                f"is used to fall back to a safer default elsewhere in the pipeline, so "
+                f"overstating confidence produces worse downstream decisions than "
+                f"admitting uncertainty.\n\n"
+                f"Output ONLY a JSON object: {{\"description\": \"...\", \"confidence\": 0.0}}"
             )
         })
 
         try:
             response = self.client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=300,
+                max_tokens=350,
                 messages=[{"role": "user", "content": content}]
             )
             log_anthropic_usage('clip_content_analysis', response)
-            description = response.content[0].text.strip()
-            logger.info(f"✓ Clip content described: {description[:100]}...")
-            return description or None
+            response_text = response.content[0].text.strip()
+
+            description, confidence = self._parse_description_response(response_text)
+            if description:
+                logger.info(f"✓ Clip content described (confidence {confidence:.2f}): {description[:100]}...")
+            return description, confidence
         except Exception as e:
             logger.warning(f"⚠ Clip content analysis failed (script will generate from metadata only): {e}")
-            return None
+            return None, 0.0
+
+    @staticmethod
+    def _parse_description_response(response_text: str) -> Tuple[Optional[str], float]:
+        """
+        Extracts {description, confidence} from the model's response.
+        Falls back to treating the raw text as the description with a
+        fixed low-moderate confidence (never a high default) if the model
+        didn't return valid JSON - an unparseable response means the
+        self-reported confidence itself is missing, which is exactly the
+        "can't verify this is accurate" case the confidence score exists
+        to catch, so this must not silently default to a high/neutral
+        value.
+        """
+        FALLBACK_CONFIDENCE_ON_PARSE_FAILURE = 0.3
+        try:
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}') + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                parsed = json.loads(response_text[start_idx:end_idx])
+                description = (parsed.get('description') or '').strip()
+                confidence = float(parsed.get('confidence', FALLBACK_CONFIDENCE_ON_PARSE_FAILURE))
+                confidence = max(0.0, min(1.0, confidence))
+                return (description or None), confidence
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+        logger.warning(
+            "⚠ Clip content analysis response wasn't valid JSON - using the raw text as the "
+            f"description with a fixed low-moderate confidence ({FALLBACK_CONFIDENCE_ON_PARSE_FAILURE}) "
+            "since the model's own confidence self-report is missing"
+        )
+        return (response_text.strip() or None), FALLBACK_CONFIDENCE_ON_PARSE_FAILURE
 
     def _extract_frames(self, source_video_path: str, start_time: float, end_time: float) -> List[str]:
         """Grabs NUM_FRAMES evenly spaced frames from [start_time, end_time] as base64 JPEGs."""
@@ -951,37 +1003,43 @@ def generate_voiceover(clip_data, trending_topics=None, channel_history=None):
     }
 
 
-def get_clip_description(clip_data, clip_index, source_video_path):
+def get_clip_description(clip_data, clip_index, source_video_path) -> Tuple[Optional[str], float]:
     """
     Runs ClipContentAnalyzer's keyframe vision pass for one clip, or
-    returns None (metadata-only degraded mode) if source_video_path is
-    unset, the clip's timing is invalid, or analysis fails. Factored out
+    returns (None, 0.0) (metadata-only degraded mode) if source_video_path
+    is unset, the clip's timing is invalid, or analysis fails. Factored out
     of generate_voiceover_for_clip() so callers that need the description
     BEFORE script generation (e.g. core/pipeline.py's format selector,
     which must know the clip's content to choose a format prior to writing
     the script) can get it once and pass it through, instead of the vision
     API being called twice for the same clip.
+
+    Returns (description, confidence) - confidence is the model's own
+    0.0-1.0 self-report of how clearly it could make out what's actually
+    happening; downstream callers (agents/format_selector.py) use this to
+    fall back to a safer default format when confidence is low rather than
+    trusting a vague or wrong description.
     """
     if not source_video_path:
-        return None
+        return None, 0.0
 
     start_time = clip_data.get('start_time', 0)
     end_time = clip_data.get('end_time', clip_data.get('duration', 0))
     if end_time <= start_time:
         logger.warning(f"⚠ Clip {clip_index + 1} has invalid timing ({start_time} -> {end_time}), skipping content analysis")
-        return None
+        return None, 0.0
 
     analyzer = ClipContentAnalyzer()
-    description = analyzer.describe_clip(source_video_path, start_time, end_time)
+    description, confidence = analyzer.describe_clip(source_video_path, start_time, end_time)
     if description is None:
         logger.info(f"ℹ Clip {clip_index + 1}: no content description available, generating script from metadata only")
-    return description
+    return description, confidence
 
 
 def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None,
                                 channel_history=None, source_video_path=None,
                                 format_type=None, other_clips_context=None,
-                                clip_description=None):
+                                clip_description=None, clip_description_confidence=None):
     """
     Generate a script + voiceover scoped to ONE specific clip. Each of the
     7 shorts calls this independently, producing its own hook/script and
@@ -1009,13 +1067,19 @@ def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None,
             if the caller already needed it before calling this (e.g. to
             feed the format selector). None re-runs the vision analysis
             internally, same as before this param existed.
+        clip_description_confidence: The model's own 0.0-1.0 confidence in
+            clip_description (also from get_clip_description()) - only
+            meaningful when clip_description was pre-computed by the
+            caller; ignored if clip_description is None since this
+            function then computes both itself.
 
     Returns:
         dict: Script + voiceover results for this one clip, including the
-        clip_description used (or None) and the format_type/format_used
-        actually applied, so downstream consumers (channel memory logging,
-        debugging) can see exactly what the script was reacting to and
-        which format it was written in.
+        clip_description used (or None), its confidence, and the
+        format_type/format_used actually applied, so downstream consumers
+        (channel memory logging, debugging, the voiceover_metadata.json
+        dump) can see exactly what the script was reacting to, how
+        confident that description was, and which format it was written in.
     """
     logger.info(f"🎬 Starting script + voiceover generation for clip {clip_index + 1}...")
 
@@ -1024,7 +1088,7 @@ def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None,
         # core/pipeline.py, which needs the description BEFORE this call to
         # feed the format selector) pass it in directly so this doesn't
         # spend a second vision API call describing the same clip twice.
-        clip_description = get_clip_description(clip_data, clip_index, source_video_path)
+        clip_description, clip_description_confidence = get_clip_description(clip_data, clip_index, source_video_path)
 
     generator = ScriptGenerator()
     script_result = generator.generate_script_for_clip(
@@ -1046,6 +1110,7 @@ def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None,
         'clip_index': clip_index,
         'script': script,
         'clip_description': clip_description,
+        'clip_description_confidence': clip_description_confidence,
         'format_type': format_type,
         'format_used': script.get('format_used'),
         'voiceover': voiceover_result,
@@ -1053,11 +1118,63 @@ def generate_voiceover_for_clip(clip_data, clip_index, trending_topics=None,
     }
 
 
+# Sized for roughly 10 seconds at Kokoro's ~150wpm estimate (see
+# KokoroTTS.generate()'s estimated_duration calculation) - lets a voice be
+# evaluated for actual quality/tone on real prose without running the
+# full pipeline (script generation, video production, etc.) just to hear
+# a few seconds of audio.
+VOICE_SAMPLE_TEXT = (
+    "This is a quick voice sample from Chaos Merchant. Rockstar quietly added "
+    "working turn signals to every vehicle in the new trailer, something the "
+    "last game never had in over a decade."
+)
+
+
+def generate_voice_sample(voice: str = None, output_path: str = None) -> dict:
+    """
+    Generates a short (~10s) sample WAV with the configured (or an
+    explicitly given) Kokoro voice, so voice quality can be evaluated
+    directly instead of only discovering how a voice actually sounds
+    partway through a real pipeline run.
+    """
+    kokoro = KokoroTTS()
+    if not kokoro.available:
+        raise RuntimeError(
+            "Kokoro TTS is not available - check KOKORO_MODEL_PATH/KOKORO_VOICES_PATH "
+            "point at real files and that kokoro-onnx is installed (pip install kokoro-onnx)"
+        )
+
+    voice = voice or kokoro.default_voice
+    output_path = output_path or f"./data/voice_sample_{voice}.wav"
+    result = kokoro.generate(VOICE_SAMPLE_TEXT, voice=voice, output_path=output_path)
+    logger.info(
+        f"✓ Voice sample generated: {result['audio_path']} "
+        f"(~{result['estimated_duration']:.1f}s estimated, voice: {voice})"
+    )
+    return result
+
+
 if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO)
-    
+
+    # python -m agents.script_voiceover --test-voice           (uses KOKORO_VOICE from .env)
+    # python -m agents.script_voiceover --test-voice=am_adam    (overrides for this run only)
+    test_voice_args = [a for a in sys.argv if a.startswith('--test-voice')]
+    if test_voice_args:
+        voice_override = None
+        if '=' in test_voice_args[0]:
+            voice_override = test_voice_args[0].split('=', 1)[1]
+        try:
+            result = generate_voice_sample(voice=voice_override)
+            print(json.dumps(result, indent=2, default=str))
+        except Exception as e:
+            print(f"❌ Voice sample generation failed: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
     # Test Kokoro availability
     print("Testing Kokoro TTS...")
     kokoro = KokoroTTS()
     print(f"Kokoro available: {kokoro.available}")
+    print("Run with --test-voice to generate a real ~10s audio sample with the configured voice.")
