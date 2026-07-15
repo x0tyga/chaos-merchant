@@ -311,10 +311,23 @@ class RedditClipFetcher:
         if not PRAW_AVAILABLE:
             return []
 
+        client_id = os.getenv('REDDIT_CLIENT_ID', '')
+        client_secret = os.getenv('REDDIT_CLIENT_SECRET', '')
+        if not client_id or not client_secret:
+            # Without this, an unconfigured Reddit source doesn't fail
+            # cleanly - PRAW still constructs a client with empty strings,
+            # then every subreddit in the list makes a REAL (failing) OAuth
+            # call to Reddit, one at a time, logging a confusing per-
+            # subreddit warning each run - noise for a source that was
+            # never going to work, on every single sourcing run, forever.
+            # One clear info line, checked before any network call, instead.
+            logger.info("ℹ Reddit sourcing skipped - REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET not configured (YouTube sourcing runs independently)")
+            return []
+
         try:
             reddit = praw.Reddit(
-                client_id=os.getenv('REDDIT_CLIENT_ID', ''),
-                client_secret=os.getenv('REDDIT_CLIENT_SECRET', ''),
+                client_id=client_id,
+                client_secret=client_secret,
                 user_agent=os.getenv('REDDIT_USER_AGENT', 'chaos-merchant/1.0')
             )
         except Exception as e:

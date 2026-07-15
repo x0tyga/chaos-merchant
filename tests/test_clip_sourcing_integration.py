@@ -159,6 +159,9 @@ CONFIG_DIR.mkdir()
 os.environ['INPUT_DIR'] = str(INPUT_DIR)
 os.environ['DATA_DIR'] = str(DATA_DIR)
 os.environ['ENABLE_NOTIFICATIONS'] = 'false'  # verify logging still happens even with delivery disabled
+os.environ['REDDIT_CLIENT_ID'] = 'fake_client_id'  # praw itself is faked below - content is never
+os.environ['REDDIT_CLIENT_SECRET'] = 'fake_client_secret'  # checked, but RedditClipFetcher now skips
+os.environ['REDDIT_USER_AGENT'] = 'chaos-merchant-test/1.0'  # Reddit entirely if these are unset
 os.environ['MIN_REDDIT_SCORE'] = '500'
 os.environ['MIN_YOUTUBE_VIEWS'] = '50000'
 os.environ['MAX_SOURCE_CLIP_SECONDS'] = '180'
