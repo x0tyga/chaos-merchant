@@ -58,6 +58,8 @@ class _FakeSubreddit:
             return [_FakeSubmission('/r/GTA6/comments/abc/big_leak/', 'Massive GTA6 leak clip', 'gta_leaker', 900)]
         if self.name == 'lowpop':
             return [_FakeSubmission('/r/lowpop/comments/xyz/meh/', 'Barely-seen clip', 'nobody', 10)]
+        if self.name == 'tier2test':
+            return [_FakeSubmission('/r/tier2test/comments/def/corrupt_one/', 'A clip that will fail post-download validation', 'someone', 900)]
         return []
 
 
@@ -117,8 +119,33 @@ def _install_fake_ytdlp():
     sys.modules['yt_dlp'] = mod
 
 
+# ---------------------------------------------------------------------------
+# Fake agents.quality_control - agents/clip_sourcing.py's
+# _validate_downloaded_file() lazily imports SourcedFileValidator from the
+# REAL quality_control.py, which itself imports real moviepy/numpy at module
+# level - neither installable in this offline sandbox. This fake is injected
+# into sys.modules the same way praw/yt_dlp are, controllable per scenario
+# via NEXT_RESULT, so Tier 2 (post-download validation) can be exercised
+# deterministically without a real decodable video file.
+# ---------------------------------------------------------------------------
+
+class _FakeSourcedFileValidator:
+    NEXT_RESULT = {'status': 'pass', 'errors': [], 'warnings': [], 'metadata': {}, 'checks': []}
+
+    @staticmethod
+    def validate(file_path, expected_duration=None):
+        return _FakeSourcedFileValidator.NEXT_RESULT
+
+
+def _install_fake_quality_control():
+    mod = types.ModuleType('agents.quality_control')
+    mod.SourcedFileValidator = _FakeSourcedFileValidator
+    sys.modules['agents.quality_control'] = mod
+
+
 _install_fake_praw()
 _install_fake_ytdlp()
+_install_fake_quality_control()
 
 # Isolated environment - own INPUT_DIR/DATA_DIR/config dir, never touches the real repo state.
 TEST_DIR = Path(tempfile.mkdtemp(prefix='chaos_merchant_sourcing_test_'))
@@ -260,6 +287,44 @@ def main():
     # Config-derived runs-per-day used by _apply_calendar_guidance - confirm it reads the SAME file main.py reads.
     agent_d = cs.ClipSourcingAgent(input_dir=str(INPUT_DIR))
     check('D8: agent initializes cleanly with the schedule-derived runs-per-day guidance', agent_d is not None)
+
+    # --- Scenario E: Tier 2 gate rejects a download that yt-dlp reported as
+    # successful but that fails post-download validation (corrupt/truncated/
+    # no real video stream) - HANDOFF.md's "Quality Gate for Sourced Content" ---
+    cs.SUBREDDITS_CONFIG_PATH.write_text(json.dumps({'subreddits': ['tier2test']}))
+    registry_e = cs.SourceRegistry(str(DATA_DIR / 'chaos_merchant.db'))
+    agent_e = cs.ClipSourcingAgent(input_dir=str(INPUT_DIR))
+    agent_e.youtube_fetcher.fetch_search_candidates = lambda *a, **kw: []
+    agent_e.youtube_fetcher.fetch_channel_candidates = lambda *a, **kw: []
+
+    _FakeSourcedFileValidator.NEXT_RESULT = {
+        'status': 'error',
+        'errors': ['File could not be opened/decoded as video: simulated corrupt download'],
+        'warnings': [], 'metadata': {},
+        'checks': [{'check': 'decodable', 'result': 'FAIL', 'expected': 'opens and reads via moviepy',
+                    'found': 'simulated corrupt download'}]
+    }
+    try:
+        summary_e = agent_e.run()
+        check('E1: post-download validation failure is NOT counted as downloaded',
+              summary_e['downloaded'] == 0 and summary_e['rejected'] == 1,
+              f"downloaded={summary_e['downloaded']} rejected={summary_e['rejected']}")
+
+        leftover = list(INPUT_DIR.glob('sourced_reddit_corrupt_one*.mp4'))
+        check('E2: the invalid downloaded file is removed from INPUT_DIR, not left for the watcher',
+              len(leftover) == 0, f"found {[p.name for p in leftover]}")
+
+        rejected_files = list((DATA_DIR / 'sourcing' / 'rejected').glob('*_REJECTED.txt'))
+        check('E3: a REJECTED.txt file was written with the failure reason',
+              len(rejected_files) == 1 and 'simulated corrupt download' in rejected_files[0].read_text(),
+              f"found {[p.name for p in rejected_files]}")
+
+        rejected_rows_e = [r for r in registry_e.get_recent(limit=20) if r['status'] == 'rejected']
+        check('E4: SourceRegistry records it as rejected (never retried) with the validation reason',
+              any('post-download validation' in (r.get('rejection_reason') or '') for r in rejected_rows_e))
+    finally:
+        # Restore for anything running after this scenario in a future edit.
+        _FakeSourcedFileValidator.NEXT_RESULT = {'status': 'pass', 'errors': [], 'warnings': [], 'metadata': {}, 'checks': []}
 
     print("=" * 70)
     passed = sum(1 for _, status, _ in results if status == 'PASS')

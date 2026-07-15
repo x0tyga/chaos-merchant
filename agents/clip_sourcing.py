@@ -690,6 +690,28 @@ class ClipSourcingAgent:
             self.limiter.record_download()
 
             if success:
+                # Tier 2 of the Quality Gate for Sourced Content: yt-dlp
+                # reporting success only means the process exited cleanly -
+                # it doesn't mean the file is a real, decodable video. Check
+                # the ACTUAL downloaded bytes before this is ever allowed
+                # into INPUT_DIR, so a corrupt/truncated download can't waste
+                # a full pipeline run before failing somewhere downstream.
+                validation = self._validate_downloaded_file(file_path, probe)
+                if validation['status'] != 'pass':
+                    reason = f"downloaded file failed post-download validation: {'; '.join(validation['errors'])}"
+                    logger.error(f"❌ Rejected after download: {candidate.get('title', source_url)[:60]!r} - {reason}")
+                    self._write_rejection_file(candidate, validation)
+                    try:
+                        file_path.unlink(missing_ok=True)
+                    except OSError as e:
+                        logger.warning(f"⚠ Could not remove invalid downloaded file {file_path}: {e}")
+                    self.registry.record_rejected(
+                        source_url, candidate['platform'], candidate.get('popularity_signal', 0),
+                        reason, title=candidate.get('title')
+                    )
+                    rejected.append({**candidate, 'rejection_reason': reason})
+                    continue
+
                 logger.info(f"✓ Downloaded: {candidate.get('title', source_url)[:60]!r} -> {file_path.name}")
                 self.registry.record_downloaded(
                     source_url, candidate['platform'], str(file_path),
@@ -795,6 +817,14 @@ class ClipSourcingAgent:
 
         send_notification("⚠ Chaos Merchant: no new clips sourced", message)
 
+    @staticmethod
+    def _safe_source_id(candidate: Dict) -> str:
+        """Shared by _build_dest_path and the Tier 2 rejection-file naming below,
+        so both derive the same id from a source_url instead of two independent
+        regexes that could drift apart."""
+        safe_id = candidate['source_url'].rstrip('/').split('/')[-1][:40]
+        return ''.join(c if c.isalnum() or c in '-_' else '_' for c in safe_id)
+
     def _build_dest_path(self, candidate: Dict) -> Path:
         """
         Deterministic filename derived from the source URL, checked
@@ -803,10 +833,52 @@ class ClipSourcingAgent:
         agents/watcher.py's in-memory-only dedup (self.processed_files,
         lost on every restart).
         """
-        safe_id = candidate['source_url'].rstrip('/').split('/')[-1][:40]
-        safe_id = ''.join(c if c.isalnum() or c in '-_' else '_' for c in safe_id)
-        filename = f"sourced_{candidate['platform']}_{safe_id}.mp4"
+        filename = f"sourced_{candidate['platform']}_{self._safe_source_id(candidate)}.mp4"
         return self.input_dir / filename
+
+    def _validate_downloaded_file(self, file_path: Path, probe: Optional[Dict]) -> Dict:
+        """
+        Tier 2 of the Quality Gate for Sourced Content (see HANDOFF.md):
+        opens the ACTUAL downloaded file and checks it, before it's
+        allowed to reach agents/watcher.py -> Step 1 (analyze_video) and
+        waste a full pipeline run on unusable input that slipped past the
+        metadata-only CopyrightRiskGate above.
+        """
+        from agents.quality_control import SourcedFileValidator
+        expected_duration = (probe or {}).get('duration_seconds')
+        return SourcedFileValidator.validate(str(file_path), expected_duration=expected_duration)
+
+    def _write_rejection_file(self, candidate: Dict, validation: Dict):
+        """
+        data/sourcing/rejected/{platform}_{id}_REJECTED.txt - same
+        convention as this session's other rejection-file work (QC's
+        per-short *_ERROR.txt/*_QC_ERROR.txt, sourcing alerts): a human
+        should be able to open one file and see exactly why a specific
+        download got thrown away, not have to grep a log stream for it.
+        """
+        try:
+            rejected_dir = Path(self.data_dir) / 'sourcing' / 'rejected'
+            rejected_dir.mkdir(parents=True, exist_ok=True)
+            out_path = rejected_dir / f"{candidate['platform']}_{self._safe_source_id(candidate)}_REJECTED.txt"
+            lines = [
+                f"Source URL: {candidate.get('source_url')}",
+                f"Platform: {candidate.get('platform')}",
+                f"Title: {candidate.get('title', '(unknown)')}",
+                f"Rejected at: {datetime.now().isoformat()}",
+                "",
+                "Failed checks:",
+            ]
+            for check in validation.get('checks', []):
+                if check['result'] == 'FAIL':
+                    lines.append(f"  - {check['check']}: expected {check['expected']}, found {check['found']}")
+            if validation.get('errors'):
+                lines.append("")
+                lines.append("Errors:")
+                lines.extend(f"  - {e}" for e in validation['errors'])
+            out_path.write_text('\n'.join(lines))
+            logger.info(f"📝 Wrote rejection file: {out_path}")
+        except Exception as e:
+            logger.warning(f"⚠ Could not write rejection file for {candidate.get('source_url')}: {e}")
 
 
 def run_clip_sourcing(dry_run: bool = False) -> Dict:

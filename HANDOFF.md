@@ -1,13 +1,14 @@
 # CHAOS MERCHANT - PROJECT HANDOFF DOCUMENT
 
-**Current Date:** 2026-07-07
-**Branch:** `claude/session-handoff-review-bawvji` (this session's designated branch, kept 1:1 in sync with `main` via fast-forward push after every fix/component)
+**Current Date:** 2026-07-15
+**Branch:** `claude/github-abundant-aho-c2btu7` (this session's designated branch, reset to match `origin/main` after discovering a parallel session's work had already superseded this branch's in-flight fixes - see DOCUMENT META for that reconciliation)
 **Current model:** `claude-sonnet-5`
-**Status:** Two completed bodies of work are now on `main`:
+**Status:** Three completed bodies of work are now on `main`:
 1. The original 5-bug punch list from the first real-hardware run (all fixed).
 2. The format pivot + autonomous sourcing/publishing system (Components 1-4 of 4, all built and pushed).
+3. The Quality Gate for Sourced Content, Tier 2 (post-download validation) - built this session, see "WHAT STILL NEEDS BUILDING" below for full detail.
 
-**Next Action:** This is a home-machine handoff. Nothing in Components 1-4 has been exercised against real Reddit/YouTube/Anthropic APIs, real ffmpeg/moviepy, or a real browser hitting the dashboard - all of it was built and verified with fake-object test harnesses in a sandbox that has none of those dependencies installed. Work through the **HOME MACHINE TO-DO LIST** below before trusting any of this in production, in the priority order given. The single biggest remaining gap is `agents/quality_control.py`'s validator has NOT been extended to gate freshly-DOWNLOADED sourced clips before they enter the pipeline (see "WHAT STILL NEEDS BUILDING" below) - autonomous sourcing currently has no post-download sanity check beyond the metadata-only `CopyrightRiskGate`.
+**Next Action:** This is still a home-machine handoff. Nothing in Components 1-4 or the new Quality Gate has been exercised against real Reddit/YouTube/Anthropic APIs, real ffmpeg/moviepy, or a real browser hitting the dashboard - all of it was built and verified with fake-object test harnesses in a sandbox that has none of those dependencies installed (confirmed directly this session: pip has no route to PyPI here - even a direct connection to pypi.org returns HTTP 403 - and ffmpeg/moviepy/Kokoro are not present; apt-get itself works fine, it's PyPI specifically that's unreachable). Work through the **HOME MACHINE TO-DO LIST** below before trusting any of this in production, in the priority order given.
 
 **Branch/remote note:** `origin/main` and `claude/session-handoff-review-bawvji` are confirmed in sync as of this update - every fix/component this session was pushed to both via fast-forward (one exception: the last 3 commits show as "Unverified" on GitHub due to a missing commit-signing key in this sandbox's git config - a signing-key limitation of this environment, not a content or authorship issue; every commit already carries the correct `Claude <noreply@anthropic.com>` author/committer identity).
 
@@ -118,16 +119,15 @@ New `agents/clip_sourcing.py`: `RedditClipFetcher` (PRAW, reuses `trend_intellig
 
 ## WHAT STILL NEEDS BUILDING (not yet implemented in code)
 
-### Quality Gate for Sourced Content (original plan's Area 4 - never built)
+### Quality Gate for Sourced Content - Tier 2 now built
 
-The original 4-area format-pivot plan's 4th area was never built under that name - Component 4 was redirected to sourcing-setup/UI work instead, at the user's explicit request. This is genuinely still missing:
+**Tier 2 (pipeline-entry gate) is done.** New `SourcedFileValidator` in `agents/quality_control.py` - deliberately NOT a reuse of `VideoValidator`'s thresholds (that class's 1080x1920/h264/aac/15-45s checks describe a FINISHED Short after reframing/export, not an arbitrary raw download in any resolution/codec). It checks only what indicates a corrupt/unusable download: file opens via moviepy, has a real video stream (width/height > 0), and duration is within `[MIN_SOURCE_DOWNLOAD_SECONDS, MAX_SOURCE_CLIP_SECONDS]` - the upper bound reuses the SAME env var `CopyrightRiskGate` already gates on pre-download, not a second independently-hardcoded number (the exact lesson from Bug 5's caption-region false positive). Also flags (as a warning, not a hard rejection) when the downloaded duration differs substantially from the pre-download probe - a signal of a partial/wrong download, not proof by itself.
 
-- **Tier 1 (sourcing-time)**: `CopyrightRiskGate` currently checks popularity/length/blocklist from metadata alone. It does NOT yet reject sub-480p-adjacent format garbage or image-only/GIF posts beyond what the existing `MIN_SOURCE_RESOLUTION_HEIGHT` check already catches - worth a second look at whether that's sufficient.
-- **Tier 2 (pipeline-entry gate) - the real gap**: nothing validates the actual DOWNLOADED file before it reaches Step 1 (`analyze_video`). A corrupt/truncated download, or a genuinely unusable file that slipped past the metadata-only gate, currently wastes a full pipeline run before failing somewhere downstream. The plan was to reuse `agents/quality_control.py`'s existing `VideoValidator` class with source-appropriate thresholds (reject <10s or >20min raw source, corrupt/no-video-track) right after download, before Step 1 - same validator, different thresholds than the finished-Short 15-45s check, per this session's established "don't let two independently-hardcoded checks drift apart" lesson (that's literally what caused Bug 5's caption-region false positive).
-- **Loud rejections**: a rejected downloaded clip should write `data/sourcing/rejected/{platform}_{id}_REJECTED.txt` stating exactly which check/threshold it failed, same pattern as this session's other rejection-file work (QC failure files, sourcing alerts).
-- **Verification plan**: feed a too-short, too-long, and corrupt test source through both tiers; confirm correct rejection files and that nothing bad reaches Step 1.
+Wired into `agents/clip_sourcing.py`'s `ClipSourcingAgent.run()` immediately after a successful `YtdlpDownloader.download()`, before the file is ever registered as downloaded: on failure, the invalid file is deleted from `INPUT_DIR` (so `watcher.py` never picks it up), a `data/sourcing/rejected/{platform}_{id}_REJECTED.txt` file is written with the specific failed check(s), `SourceRegistry.record_rejected()` marks the URL so it's never retried, and it's counted in the run summary's `rejected` total (feeding the existing empty-run alert's reason-breakdown for free).
 
-This is comparatively small scope - mostly wiring an existing validator to a new call site plus the rejection-file convention - and is the natural next candidate for "Component 5" if the user wants to proceed with it.
+Verified via a standalone unit test (missing file, trivially small/corrupt file, zero-dimension "video", too-short, too-long, clean pass, duration-vs-probe warning vs. no-warning, and a `VideoFileClip()` raise all produce the correct result) plus an extension of `tests/test_clip_sourcing_integration.py` (new Scenario E) - which required faking `agents.quality_control` in that test the same way `praw`/`yt_dlp` were already faked, since the real module needs moviepy/numpy that aren't installed in this dev sandbox, and the existing fake-downloaded bytes were never real video content (my new gate would have correctly rejected every prior "successful" download in that test otherwise - not a bug, just a fixture that needed updating). **21 -> 25 checks, all passing.**
+
+**Tier 1 (sourcing-time metadata gate)** - `CopyrightRiskGate` - is unchanged; still worth a second look at whether it should reject sub-480p-adjacent format garbage or image-only/GIF posts beyond the existing `MIN_SOURCE_RESOLUTION_HEIGHT` check, but that's a separate, smaller open question, not blocking.
 
 ### Other known gaps, carried forward or newly surfaced
 
@@ -153,13 +153,13 @@ Everything below is either still-pending from before this session (items 1-4, ne
 
 5. **Run `python main.py --verify`.** Confirms ffmpeg, ImageMagick (real render test), Kokoro model files, `ANTHROPIC_API_KEY` (live call), Reddit credentials (live call), `YOUTUBE_API_KEY`, yt-dlp (live test search), music folder, and caption font - all in one command, before starting anything else.
 
-6. **Run the sourcing integration test.** `python tests/test_clip_sourcing_integration.py` - should print `21/21 checks passed`. This runs entirely offline (fake praw/yt-dlp), so it's safe to run on any machine regardless of credentials, and worth re-running after any future change to `agents/clip_sourcing.py`.
+6. **Run the sourcing integration test.** `python tests/test_clip_sourcing_integration.py` - should print `25/25 checks passed` (was 21/21 before this session's Quality Gate Tier 2 addition - Scenario E covers it). This runs entirely offline (fake praw/yt-dlp/quality_control), so it's safe to run on any machine regardless of credentials, and worth re-running after any future change to `agents/clip_sourcing.py` or `agents/quality_control.py`.
 
 7. **Populate `config/source_channels.json`** via the dashboard's Sources tab (or leave it empty - trending/search-query sourcing still works independently, curated-channel sourcing just contributes nothing until at least one channel is added).
 
-8. **Dry-run the sourcing agent for real** before it ever downloads anything: `python -m agents.clip_sourcing --dry-run`. Review what it WOULD download and why, against real live Reddit/YouTube data.
+8. **Dry-run the sourcing agent for real** before it ever downloads anything: `python -m agents.clip_sourcing --dry-run`. Review what it WOULD download and why, against real live Reddit/YouTube data. Note: `--dry-run` never downloads, so it can't exercise the new Tier 2 post-download validation - the first REAL (non-dry-run) run is what actually exercises `SourcedFileValidator` against real downloaded files for the first time; watch `data/sourcing/rejected/` for any `_REJECTED.txt` files afterward.
 
-9. **Review `config/content_calendar.json`** (`posts_per_day`, `format_mix`) and the copyright-gate thresholds in `.env` (`MIN_REDDIT_SCORE`, `MIN_YOUTUBE_VIEWS`, `MAX_SOURCE_CLIP_SECONDS`, `MIN_SOURCE_RESOLUTION_HEIGHT`) - defaults are in place and were reviewed during this session, but this is your channel and your risk tolerance to confirm.
+9. **Review `config/content_calendar.json`** (`posts_per_day`, `format_mix`) and the copyright-gate thresholds in `.env` (`MIN_REDDIT_SCORE`, `MIN_YOUTUBE_VIEWS`, `MAX_SOURCE_CLIP_SECONDS`, `MIN_SOURCE_RESOLUTION_HEIGHT`, `MIN_SOURCE_DOWNLOAD_SECONDS`) - defaults are in place and were reviewed during this session, but this is your channel and your risk tolerance to confirm.
 
 10. **Run `python -m core.publisher setup-youtube` once** (interactive OAuth) - required before `AUTO_POST_YOUTUBE` can ever actually post anything, independent of the flag's value. Do this well before you intend to flip the flag on, so you can confirm it worked with `AUTO_POST_YOUTUBE` still `false`.
 
@@ -180,13 +180,15 @@ Everything below is either still-pending from before this session (items 1-4, ne
 1. Read this HANDOFF.md top to bottom.
 2. `git log --oneline -20` and `git status` to confirm exactly which fixes/components have landed and on which branch/remote.
 3. Both Phase 1 (5 bugs) and Phase 2 (Components 1-4) are complete and on `main`. Work through the HOME MACHINE TO-DO LIST above before trusting any of it in production.
-4. The next candidate body of work is the Quality Gate for Sourced Content (see "WHAT STILL NEEDS BUILDING" above) - scoped but not built. Don't start building it until the user explicitly asks.
-5. Everything in Phase 2 was verified with fake-object test harnesses only (this sandbox has no `anthropic`/`praw`/`yt_dlp`/`flask`/`moviepy`/etc. installed) - treat it as "logic verified, never run for real" until the home-machine to-do list has been worked through.
+4. The Quality Gate for Sourced Content (Tier 2) is now built - see "WHAT STILL NEEDS BUILDING" above for what's left (Tier 1 is a smaller, non-blocking open question).
+5. Everything in Phase 2 and the new Quality Gate was verified with fake-object test harnesses only (this sandbox has no `anthropic`/`praw`/`yt_dlp`/`flask`/`moviepy`/etc. installed, and PyPI itself is unreachable from here - confirmed directly, not assumed) - treat all of it as "logic verified, never run for real" until the home-machine to-do list has been worked through.
 
 ---
 
 ## DOCUMENT META
 
 **Document created:** 2026-07-02
-**Last updated:** 2026-07-07, full handoff rewrite after the format-pivot session (Components 1-4 complete) - added Phase 2 section, flagged that the original plan's "Quality Gate for Sourced Content" area was redirected to different Component 4 scope and remains unbuilt, rewrote the home-machine to-do list to merge still-pending Phase 1 items with new Phase 2 setup/verification steps in priority order.
-**Status:** Phase 1 (5 bugs) and Phase 2 (Components 1-4 of the format pivot) are both complete and on `main`. Next milestone: work through the HOME MACHINE TO-DO LIST (real-hardware pipeline test still unconfirmed since before this session; all Phase 2 sourcing/publishing/dashboard code needs its first real-API exercise). Quality Gate for Sourced Content is the scoped-but-not-built next candidate.
+**Last updated:** 2026-07-15. Two things happened this session:
+1. **Reconciliation**: this session started mid-way through re-fixing Bugs 3-5 independently, unaware that a different, longer-running session (`claude/session-handoff-review-bawvji`) had already fixed all three plus built the entire Phase 2 format pivot, and merged it all to `main`. Caught before pushing (a stop-hook authorship check on the redundant local commit prompted a closer look at `origin/main`, which had diverged far more than expected). This session's branch was reset to match `origin/main` exactly, discarding the now-superseded redundant fix, rather than trying to merge two divergent lines of the same bug fix.
+2. **New work**: built Tier 2 of the Quality Gate for Sourced Content (post-download validation), the one item "WHAT STILL NEEDS BUILDING" had flagged as the single biggest remaining gap - see that section for full detail. Also empirically confirmed (rather than assumed) that this dev sandbox has no route to PyPI at all (direct connection to pypi.org returns HTTP 403), while `apt-get`/GitHub are reachable - relevant context for anyone continuing work here.
+**Status:** Phase 1 (5 bugs), Phase 2 (Components 1-4 of the format pivot), and the Quality Gate's Tier 2 are all complete and on `main`. Next milestone: work through the HOME MACHINE TO-DO LIST - nothing in any of the above has run against real APIs/ffmpeg/moviepy/a real browser yet. Tier 1 of the Quality Gate (a smaller open question about the pre-download metadata gate) is the only remaining scoped-but-not-fully-settled item.

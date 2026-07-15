@@ -259,6 +259,119 @@ class VideoValidator:
         }
 
 
+class SourcedFileValidator:
+    """
+    Validates a freshly-DOWNLOADED source file (agents/clip_sourcing.py)
+    before it's allowed into INPUT_DIR for the normal pipeline to pick up -
+    the "Tier 2" gate from HANDOFF.md's Quality Gate for Sourced Content
+    plan. `agents/clip_sourcing.py`'s CopyrightRiskGate only ever inspects
+    what yt-dlp's PRE-download probe reported; it can't catch a download
+    that yt-dlp claims succeeded but that's actually corrupt, truncated, or
+    has no real video stream.
+
+    Deliberately does NOT reuse VideoValidator's thresholds (1080x1920,
+    h264/aac, 15-45s) - those describe a FINISHED Short after reframing/
+    captions/export, not an arbitrary raw download that could be any
+    resolution/codec/aspect ratio. This checks only what indicates a
+    corrupt or unusable download, not production-readiness (clip_intelligence.py
+    and the rest of the pipeline already handle that for anything that
+    passes this gate).
+
+    MAX_SOURCE_DURATION reads the SAME env var CopyrightRiskGate already
+    gates on pre-download (MAX_SOURCE_CLIP_SECONDS), not a second,
+    independently-hardcoded number - this codebase's Bug 5 postmortem is
+    exactly what happens when two checks for the same real-world limit are
+    allowed to drift apart (QC's stale caption-region guess vs. Bug 3's
+    actual new caption position).
+    """
+
+    # A genuinely corrupt/truncated download is typically a handful of KB
+    # or less; a real clip even at the shortest allowed duration is far
+    # bigger than this regardless of resolution/bitrate.
+    MIN_FILE_SIZE = 50_000
+    MIN_SOURCE_DURATION = float(os.getenv('MIN_SOURCE_DOWNLOAD_SECONDS', 5))
+    MAX_SOURCE_DURATION = float(os.getenv('MAX_SOURCE_CLIP_SECONDS', 180))
+    # A probed (pre-download) duration wildly different from the actual
+    # downloaded file's duration suggests a partial/wrong download slipped
+    # past yt-dlp reporting success - not proof by itself, but worth
+    # flagging loudly rather than silently trusting the probe forever.
+    DURATION_MISMATCH_RATIO = 0.5
+
+    @staticmethod
+    def validate(file_path: str, expected_duration: float = None) -> Dict:
+        """
+        Returns: {status: 'pass'|'error', errors[], warnings[], metadata, checks[]}
+        - same shape as VideoValidator.validate_video() so callers can
+        treat both the same way.
+        """
+        errors = []
+        warnings = []
+        metadata = {}
+        checks = []
+
+        path = Path(file_path)
+
+        if not path.exists():
+            checks.append({'check': 'file_exists', 'result': 'FAIL', 'expected': 'file present', 'found': 'missing'})
+            return {'status': 'error', 'errors': [f'File not found: {path}'], 'warnings': [], 'metadata': {}, 'checks': checks}
+
+        file_size = path.stat().st_size
+        metadata['file_size_bytes'] = file_size
+        if file_size < SourcedFileValidator.MIN_FILE_SIZE:
+            errors.append(f'File too small to be a real video: {file_size} bytes (min: {SourcedFileValidator.MIN_FILE_SIZE})')
+            checks.append({'check': 'file_size', 'result': 'FAIL', 'expected': f'>={SourcedFileValidator.MIN_FILE_SIZE} bytes', 'found': f'{file_size} bytes'})
+        else:
+            checks.append({'check': 'file_size', 'result': 'PASS', 'expected': f'>={SourcedFileValidator.MIN_FILE_SIZE} bytes', 'found': f'{file_size} bytes'})
+
+        clip = None
+        try:
+            clip = VideoFileClip(str(path))
+            duration = clip.duration or 0
+            width, height = clip.w or 0, clip.h or 0
+            metadata['duration'] = duration
+            metadata['width'] = width
+            metadata['height'] = height
+
+            if width <= 0 or height <= 0:
+                errors.append(f'No real video stream detected (dimensions {width}x{height})')
+                checks.append({'check': 'video_stream', 'result': 'FAIL', 'expected': 'width>0 and height>0', 'found': f'{width}x{height}'})
+            else:
+                checks.append({'check': 'video_stream', 'result': 'PASS', 'expected': 'width>0 and height>0', 'found': f'{width}x{height}'})
+
+            if duration < SourcedFileValidator.MIN_SOURCE_DURATION:
+                errors.append(f'Source duration too short: {duration:.1f}s (min: {SourcedFileValidator.MIN_SOURCE_DURATION}s)')
+                checks.append({'check': 'duration', 'result': 'FAIL', 'expected': f'{SourcedFileValidator.MIN_SOURCE_DURATION}-{SourcedFileValidator.MAX_SOURCE_DURATION}s', 'found': f'{duration:.1f}s'})
+            elif duration > SourcedFileValidator.MAX_SOURCE_DURATION:
+                errors.append(f'Source duration too long: {duration:.1f}s (max: {SourcedFileValidator.MAX_SOURCE_DURATION}s)')
+                checks.append({'check': 'duration', 'result': 'FAIL', 'expected': f'{SourcedFileValidator.MIN_SOURCE_DURATION}-{SourcedFileValidator.MAX_SOURCE_DURATION}s', 'found': f'{duration:.1f}s'})
+            else:
+                checks.append({'check': 'duration', 'result': 'PASS', 'expected': f'{SourcedFileValidator.MIN_SOURCE_DURATION}-{SourcedFileValidator.MAX_SOURCE_DURATION}s', 'found': f'{duration:.1f}s'})
+
+            if expected_duration and expected_duration > 0 and duration > 0:
+                relative_diff = abs(duration - expected_duration) / expected_duration
+                if relative_diff > SourcedFileValidator.DURATION_MISMATCH_RATIO:
+                    warnings.append(
+                        f'Downloaded duration ({duration:.1f}s) differs substantially from the '
+                        f'pre-download probe ({expected_duration:.1f}s) - possible partial/wrong download'
+                    )
+                    checks.append({'check': 'duration_vs_probe', 'result': 'WARN', 'expected': f'~{expected_duration:.1f}s', 'found': f'{duration:.1f}s'})
+                else:
+                    checks.append({'check': 'duration_vs_probe', 'result': 'PASS', 'expected': f'~{expected_duration:.1f}s', 'found': f'{duration:.1f}s'})
+
+        except Exception as e:
+            errors.append(f'File could not be opened/decoded as video: {e}')
+            checks.append({'check': 'decodable', 'result': 'FAIL', 'expected': 'opens and reads via moviepy', 'found': str(e)})
+        finally:
+            if clip is not None:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+
+        status = 'error' if errors else 'pass'
+        return {'status': status, 'errors': errors, 'warnings': warnings, 'metadata': metadata, 'checks': checks}
+
+
 class CaptionValidator:
     """Validates that captions were burned into video frames (Phase 2 requirement)"""
 
