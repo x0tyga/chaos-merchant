@@ -45,6 +45,7 @@ SORT file.name ASC
 - [[Token-Usage]] — Claude API spend, per business
 - [[Agent-Registry]] — every AI agent built, across all businesses, what it does, its status
 - [[File-Audit]] — doc health / staleness checklist, across all businesses
+- [[CEO-Agent-Discovery-Prompt]] — the scoping-interview prompt for the CEO-agent-that-hires-agents system (in progress)
 
 ## Anything needing your attention right now
 
